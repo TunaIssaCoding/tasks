@@ -1,257 +1,827 @@
-/* Tasks PWA with GitHub-backed sync. ES2017 max (old iPad Safari). No task data ships with this code. */
+/* GitHub-backed Tasks PWA. Classic script; ES2017 syntax. No bundled task data. */
 (function () {
   'use strict';
-  var CFG_KEY = 'tasks.cfg', DOC_KEY = 'tasks.doc', META_KEY = 'tasks.meta';
+
+  var CFG_KEY = 'tasks.cfg', DOC_KEY = 'tasks.doc', OLD_META_KEY = 'tasks.meta';
   var FILE = 'tasks.json', NATIVE_MIN = 5000, POLL_MS = 15000;
-  var SECTIONS = [{ id: 'today', name: 'Today' }, { id: 'followups', name: 'Follow-ups' }, { id: 'triggers', name: 'Triggers' }, { id: 'longterm', name: 'Long-term' }, { id: 'ideas', name: 'Ideas' }];
+  var SECTIONS = [
+    { id: 'today', name: 'Today' },
+    { id: 'followups', name: 'Follow-ups' },
+    { id: 'triggers', name: 'Triggers' },
+    { id: 'longterm', name: 'Long-term' },
+    { id: 'ideas', name: 'Ideas' }
+  ];
 
-  if (!Element.prototype.matches) Element.prototype.matches = Element.prototype.webkitMatchesSelector;
-  if (!Element.prototype.closest) Element.prototype.closest = function (s) { var el = this; while (el && el.nodeType === 1) { if (el.matches(s)) return el; el = el.parentNode; } return null; };
+  if (!Element.prototype.matches) {
+    Element.prototype.matches = Element.prototype.webkitMatchesSelector;
+  }
+  if (!Element.prototype.closest) {
+    Element.prototype.closest = function (selector) {
+      var el = this;
+      while (el && el.nodeType === 1) {
+        if (el.matches(selector)) return el;
+        el = el.parentNode;
+      }
+      return null;
+    };
+  }
 
-  function $(s, r) { return (r || document).querySelector(s); }
+  function $(selector, root) {
+    return (root || document).querySelector(selector);
+  }
   function now() { return Date.now(); }
-  function load(k, d) { try { var v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }
-  function save(k, v) { localStorage.setItem(k, JSON.stringify(v)); }
-  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
-  function todayIso() { var d = new Date(); return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2); }
-  function b64decode(s) { return decodeURIComponent(escape(atob(s.replace(/\s/g, '')))); }
-  function b64encode(s) { return btoa(unescape(encodeURIComponent(s))); }
-  function rid() { return 'web-' + Math.random().toString(36).slice(2, 10); }
+  function clone(value) { return JSON.parse(JSON.stringify(value)); }
+  function load(key, fallback) {
+    try {
+      var value = localStorage.getItem(key);
+      return value ? JSON.parse(value) : fallback;
+    } catch (e) {
+      return fallback;
+    }
+  }
+  function save(key, value) {
+    localStorage.setItem(key, JSON.stringify(value));
+  }
+  function esc(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, function (c) {
+      return {
+        '&': '&amp;', '<': '&lt;', '>': '&gt;',
+        '"': '&quot;', "'": '&#39;'
+      }[c];
+    });
+  }
+  function todayIso() {
+    var d = new Date();
+    return d.getFullYear() + '-' +
+      ('0' + (d.getMonth() + 1)).slice(-2) + '-' +
+      ('0' + d.getDate()).slice(-2);
+  }
+  function parseDate(value) {
+    var s = String(value).trim();
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+    if (!m) return null;
+    var year = Number(m[1]), month = Number(m[2]), day = Number(m[3]);
+    var d = new Date(0);
+    d.setUTCFullYear(year, month - 1, day);
+    d.setUTCHours(0, 0, 0, 0);
+    return d.getUTCFullYear() === year &&
+      d.getUTCMonth() === month - 1 && d.getUTCDate() === day ? s : null;
+  }
+  function b64decode(value) {
+    return decodeURIComponent(escape(atob(value.replace(/\s/g, ''))));
+  }
+  function b64encode(value) {
+    return btoa(unescape(encodeURIComponent(value)));
+  }
+  function deviceId() {
+    var bytes = new Uint8Array(16);
+    if (window.crypto && window.crypto.getRandomValues) {
+      window.crypto.getRandomValues(bytes);
+      return 'web-' + Array.prototype.map.call(bytes, function (b) {
+        return ('0' + b.toString(16)).slice(-2);
+      }).join('');
+    }
+    return 'web-' + now().toString(36) + '-' +
+      Math.random().toString(36).slice(2);
+  }
+  function emptyDoc() {
+    return { schema: 2, sections: clone(SECTIONS), tasks: [], updatedAt: 0 };
+  }
+  function validateDoc(value) {
+    if (!value || value.schema !== 2 ||
+        !Array.isArray(value.sections) || !Array.isArray(value.tasks)) {
+      throw new Error('Invalid tasks.json schema');
+    }
+    var ids = Object.create(null);
+    value.tasks.forEach(function (t) {
+      if (!t || !Number.isSafeInteger(t.id) || t.id < 0 || ids[t.id]) {
+        throw new Error('Invalid or duplicate task ID');
+      }
+      ids[t.id] = true;
+    });
+    return value;
+  }
+
+  /*
+   * Canonical comparison ignores local-only bookkeeping and document
+   * updatedAt. Section changes and all public task fields remain significant.
+   */
+  function publicTask(task) {
+    var result = {};
+    Object.keys(task).forEach(function (key) {
+      if (key.charAt(0) !== '_') result[key] = task[key];
+    });
+    return result;
+  }
+  function canonical(value) {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value && typeof value === 'object') {
+      var result = {};
+      Object.keys(value).sort().forEach(function (key) {
+        result[key] = canonical(value[key]);
+      });
+      return result;
+    }
+    return value;
+  }
+  function taskKey(task) {
+    return JSON.stringify(canonical(publicTask(task)));
+  }
+  function clean(value) {
+    return {
+      schema: 2,
+      sections: clone(value.sections),
+      tasks: value.tasks.map(publicTask).sort(function (a, b) {
+        return a.id - b.id;
+      }),
+      updatedAt: value.updatedAt || 0
+    };
+  }
+  function sameDoc(a, b) {
+    var left = clean(a), right = clean(b);
+    delete left.updatedAt;
+    delete right.updatedAt;
+    return JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
+  }
+  function taskMap(value) {
+    var result = Object.create(null);
+    value.tasks.forEach(function (t) { result[t.id] = t; });
+    return result;
+  }
 
   var cfg = load(CFG_KEY, {});
-  if (!cfg.deviceId) { cfg.deviceId = rid(); save(CFG_KEY, cfg); }
+  if (!cfg.deviceId) cfg.deviceId = deviceId();
   if (!cfg.repo) cfg.repo = 'TunaIssaCoding/tasks-data';
-  var doc = load(DOC_KEY, null) || { schema: 2, sections: SECTIONS.slice(), tasks: [], updatedAt: 0 };
-  var meta = load(META_KEY, { sha: null, dirty: false, lastSync: 0 });
-  var ui = { query: '', showHidden: false, open: {}, status: 'idle', msg: '' };
-  var syncing = false, again = false, pollTimer = 0, debounce = 0;
 
-  /* ---------- merge (same rules as box CLI) ---------- */
+  var stored = load(DOC_KEY, null);
+  var doc = emptyDoc();
+  var meta = { sha: null, dirty: false, lastSync: 0, base: emptyDoc() };
+
+  if (stored && stored.doc && stored.repo === cfg.repo) {
+    doc = stored.doc;
+    meta = stored.meta || meta;
+  } else if (stored && stored.schema === 2) {
+    doc = stored;
+    var oldMeta = load(OLD_META_KEY, {});
+    meta.sha = oldMeta.sha || null;
+    meta.lastSync = oldMeta.lastSync || 0;
+  }
+  if (!meta.base) meta.base = emptyDoc();
+
+  var ui = {
+    query: '', showHidden: false, open: {},
+    status: 'idle', msg: '', setup: false
+  };
+  var syncing = false, again = false, pollTimer = 0, debounce = 0;
+  var storageError = '';
+
+  function pending() {
+    var base = taskMap(meta.base);
+    return doc.tasks.filter(function (t) {
+      return !base[t.id] || taskKey(t) !== taskKey(base[t.id]);
+    }).length;
+  }
+  function updateDirty() {
+    meta.dirty = !sameDoc(doc, meta.base);
+  }
+  function persist() {
+    updateDirty();
+    try {
+      /*
+       * Document and acknowledgement baseline are one localStorage write.
+       * A crash cannot leave a new edit paired with an old "clean" flag.
+       */
+      save(DOC_KEY, { repo: cfg.repo, doc: doc, meta: meta });
+      storageError = '';
+      return true;
+    } catch (e) {
+      storageError = 'Browser storage failed; edits are not saved offline';
+      setStatus('err', storageError);
+      return false;
+    }
+  }
+
+  /* ---------- merge ---------- */
+
   function wins(a, b) {
-    var ua = a.updatedAt || 0, ub = b.updatedAt || 0;
-    if (ua !== ub) return ua > ub;
+    var ta = a.updatedAt || 0, tb = b.updatedAt || 0;
+    if (ta !== tb) return ta > tb;
     return String(a.deviceId || '') > String(b.deviceId || '');
   }
+  function sameCreation(local, remote) {
+    if (local.createdAt !== remote.createdAt ||
+        local.source !== remote.source) return false;
+    /*
+     * While a creation is unacknowledged, its original writer distinguishes
+     * simultaneous creations sharing a millisecond.
+     */
+    if (local._new) {
+      return String(remote.deviceId || '') ===
+        String(local._creator || local.deviceId || '');
+    }
+    return true;
+  }
   function merge(local, remote) {
-    var map = {}, i, t, out = [];
-    var rmap = {};
-    (remote.tasks || []).forEach(function (r) { rmap[r.id] = r; });
-    // renumber local-only new tasks whose id was taken remotely by a different task
-    var maxN = NATIVE_MIN - 1;
-    (remote.tasks || []).concat(local.tasks || []).forEach(function (x) { if (x.id >= NATIVE_MIN && x.id > maxN) maxN = x.id; });
-    (local.tasks || []).forEach(function (l) {
-      var r = rmap[l.id];
-      if (l._new && r && r.createdAt !== l.createdAt) { maxN += 1; l.id = maxN; l.label = String(maxN); l.updatedAt = now(); }
+    var remoteMap = taskMap(remote), map = Object.create(null);
+    var next = NATIVE_MIN - 1;
+    var localTasks = local.tasks.map(clone);
+
+    localTasks.concat(remote.tasks).forEach(function (t) {
+      if (t.id >= NATIVE_MIN && t.id > next) next = t.id;
     });
-    (local.tasks || []).forEach(function (l) { map[l.id] = l; });
-    (remote.tasks || []).forEach(function (r) {
-      var cur = map[r.id];
-      if (!cur) map[r.id] = r;
-      else if (wins(r, cur)) map[r.id] = r;
-      else if (cur._new && !wins(cur, r) === false) { /* keep local */ }
+    localTasks.forEach(function (t) {
+      var r = remoteMap[t.id];
+      if (t._new && r && !sameCreation(t, r)) {
+        next += 1;
+        t.id = next;
+        t.label = String(next);
+      } else if (t._new && r && sameCreation(t, r)) {
+        delete t._new;
+        delete t._creator;
+      }
+      map[t.id] = t;
     });
-    for (i in map) if (Object.prototype.hasOwnProperty.call(map, i)) { t = map[i]; if (rmap[t.id] && t._new && rmap[t.id].createdAt === t.createdAt) delete t._new; out.push(t); }
-    out.sort(function (a, b) { return a.id - b.id; });
-    var secs = (local.sections && local.sections.length ? local.sections : SECTIONS).slice();
-    (remote.sections || []).forEach(function (s) { if (!secs.some(function (x) { return x.id === s.id; })) secs.push(s); });
-    return { schema: 2, sections: secs, tasks: out, updatedAt: Math.max(local.updatedAt || 0, remote.updatedAt || 0) };
-  }
-  function sameTasks(a, b) {
-    function key(d) { return JSON.stringify((d.tasks || []).map(function (t) { return [t.id, t.updatedAt, t.deviceId]; })); }
-    return key(a) === key(b);
-  }
-  function clean(d) {
-    return { schema: 2, sections: d.sections, updatedAt: now(), tasks: d.tasks.map(function (t) { var c = {}, k; for (k in t) if (k.charAt(0) !== '_') c[k] = t[k]; return c; }) };
+    remote.tasks.forEach(function (r) {
+      var current = map[r.id];
+      /* Exact LWW ties use the fetched remote record. */
+      if (!current || !wins(current, r)) map[r.id] = clone(r);
+    });
+
+    var sections = clone(remote.sections);
+    var sectionIds = Object.create(null);
+    sections.forEach(function (s) { sectionIds[s.id] = true; });
+    local.sections.forEach(function (s) {
+      if (!sectionIds[s.id]) {
+        sections.push(clone(s));
+        sectionIds[s.id] = true;
+      }
+    });
+    return {
+      schema: 2,
+      sections: sections,
+      tasks: Object.keys(map).map(function (id) { return map[id]; })
+        .sort(function (a, b) { return a.id - b.id; }),
+      updatedAt: Math.max(local.updatedAt || 0, remote.updatedAt || 0)
+    };
   }
 
   /* ---------- GitHub contents API ---------- */
+
+  function apiError(method, status) {
+    var e = new Error(method + ' ' + status);
+    e.status = status;
+    return e;
+  }
   function gh(method, path, body) {
-    var url = 'https://api.github.com/repos/' + cfg.repo + '/contents/' + path + (method === 'GET' ? '?ref=main&t=' + now() : '');
-    return fetch(url, {
-      method: method, cache: 'no-store',
-      headers: { 'Authorization': 'token ' + cfg.token, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' },
+    return fetch('https://api.github.com/repos/' + cfg.repo + path, {
+      method: method,
+      cache: 'no-store',
+      credentials: 'omit',
+      headers: {
+        'Authorization': 'token ' + cfg.token,
+        'Accept': 'application/vnd.github+json',
+        'Content-Type': 'application/json'
+      },
       body: body ? JSON.stringify(body) : undefined
     });
   }
   async function getRemote() {
-    var res = await gh('GET', FILE);
-    if (res.status === 404) return { doc: { schema: 2, sections: SECTIONS.slice(), tasks: [] }, sha: null };
-    if (!res.ok) { var e = new Error('GET ' + res.status); e.status = res.status; throw e; }
-    var j = await res.json();
-    return { doc: JSON.parse(b64decode(j.content)), sha: j.sha };
+    var res = await gh('GET', '/contents/' + FILE + '?ref=main&t=' + now());
+    if (res.status === 404) {
+      /* A missing file is not evidence that this private repo is accessible. */
+      var repoResponse = await gh('GET', '?t=' + now());
+      if (!repoResponse.ok) throw apiError('GET', repoResponse.status);
+      return { doc: emptyDoc(), sha: null };
+    }
+    if (!res.ok) throw apiError('GET', res.status);
+    var entry = await res.json();
+    var content = entry.content;
+    if (!content && entry.size > 0) {
+      var blobResponse = await gh('GET', '/git/blobs/' + entry.sha);
+      if (!blobResponse.ok) throw apiError('GET blob', blobResponse.status);
+      var blob = await blobResponse.json();
+      content = blob.content;
+    }
+    return {
+      doc: validateDoc(JSON.parse(b64decode(content))),
+      sha: entry.sha
+    };
   }
-
+  function delay(ms) {
+    return new Promise(function (resolve) { setTimeout(resolve, ms); });
+  }
+  function acknowledge(published) {
+    var acknowledged = taskMap(published);
+    doc.tasks.forEach(function (t) {
+      var sent = acknowledged[t.id];
+      if (t._new && sent &&
+          t.createdAt === sent.createdAt && t.source === sent.source) {
+        delete t._new;
+        delete t._creator;
+      }
+    });
+  }
   async function sync() {
-    if (!cfg.token) return;
-    if (syncing) { again = true; return; }
-    syncing = true; setStatus('busy', 'Syncing…');
+    if (!cfg.token || ui.setup) return;
+    if (syncing) {
+      again = true;
+      return;
+    }
+    syncing = true;
+    setStatus('busy', 'Syncing…');
     try {
+      var completed = false;
       for (var attempt = 0; attempt < 6; attempt++) {
-        var r = await getRemote();
-        var merged = merge(doc, r.doc);
-        var changed = !sameTasks(merged, r.doc);
-        doc = merged; save(DOC_KEY, doc); meta.sha = r.sha; render();
-        if (!changed) { meta.dirty = false; break; }
-        if (!meta.dirty && attempt === 0 && !changed) break;
-        var body = { message: 'app edit [' + cfg.deviceId + ']', branch: 'main', content: b64encode(JSON.stringify(clean(doc), null, 1)) };
-        if (r.sha) body.sha = r.sha;
-        var put = await gh('PUT', FILE, body);
-        if (put.ok) {
-          var pj = await put.json(); meta.sha = pj.content.sha; meta.dirty = false;
-          doc.tasks.forEach(function (t) { delete t._new; }); save(DOC_KEY, doc);
+        var remote = await getRemote();
+
+        /*
+         * Read the live document after GET resolves. Edits during GET are
+         * included; merge never mutates either input.
+         */
+        doc = merge(doc, remote.doc);
+        meta.base = clean(remote.doc);
+        meta.sha = remote.sha;
+        persist();
+        render();
+
+        if (sameDoc(doc, remote.doc)) {
+          completed = true;
           break;
         }
-        if (put.status === 409 || put.status === 422 || put.status >= 500) { await new Promise(function (ok) { setTimeout(ok, 400 * (attempt + 1)); }); continue; }
-        var e = new Error('PUT ' + put.status); e.status = put.status; throw e;
+
+        /* This immutable snapshot, not the subsequently edited doc, is sent. */
+        var published = clean(doc);
+        published.updatedAt = Math.max(now(), published.updatedAt || 0);
+        var body = {
+          message: 'app edit [' + cfg.deviceId + ']',
+          branch: 'main',
+          content: b64encode(JSON.stringify(published, null, 1))
+        };
+        if (remote.sha) body.sha = remote.sha;
+        var response = await gh('PUT', '/contents/' + FILE, body);
+
+        if (response.ok) {
+          var result = await response.json();
+          meta.base = published;
+          meta.sha = result.content.sha;
+          acknowledge(published);
+
+          /*
+           * Preserve edits made after the snapshot. Their versions exceed the
+           * sent versions; they remain dirty against the published baseline.
+           */
+          doc = merge(doc, published);
+          completed = true;
+          break;
+        }
+        if (response.status === 409 || response.status === 422 ||
+            response.status >= 500) {
+          if (attempt < 5) await delay(400 * (attempt + 1));
+          continue;
+        }
+        throw apiError('PUT', response.status);
       }
-      meta.lastSync = now(); save(META_KEY, meta);
-      setStatus('ok', 'Synced ' + new Date(meta.lastSync).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+      if (!completed) throw new Error('Repeated sync conflicts');
+
+      meta.lastSync = now();
+      persist();
+      render();
+      if (storageError) {
+        setStatus('err', storageError);
+      } else if (meta.dirty) {
+        setStatus('busy', pending() + ' queued');
+        again = true;
+      } else {
+        setStatus('ok', 'Synced ' +
+          new Date(meta.lastSync).toLocaleTimeString());
+      }
     } catch (err) {
-      save(META_KEY, meta);
-      if (err.status === 401 || err.status === 403) setStatus('err', 'Token rejected (' + err.status + ')');
-      else if (err.status === 404) setStatus('err', 'Repo not found');
-      else setStatus('err', (navigator.onLine === false ? 'Offline' : 'Sync failed') + (meta.dirty ? ' · ' + pending() + ' queued' : ''));
+      persist();
+      if (storageError) {
+        setStatus('err', storageError);
+      } else if (err.status === 401 || err.status === 403) {
+        setStatus('err', 'Token rejected (' + err.status + ')');
+      } else if (err.status === 404) {
+        setStatus('err', 'Repo not found or token lacks access');
+      } else {
+        setStatus('err',
+          (navigator.onLine === false ? 'Offline' : 'Sync failed') +
+          (meta.dirty ? ' · ' + pending() + ' queued' : ''));
+      }
     } finally {
       syncing = false;
-      if (again) { again = false; sync(); }
+      if (again) {
+        again = false;
+        schedule(300);
+      }
     }
   }
-  function pending() { return doc.tasks.filter(function (t) { return (t.updatedAt || 0) > (meta.lastSync || 0); }).length; }
-  function schedule(ms) { clearTimeout(debounce); debounce = setTimeout(sync, ms == null ? 300 : ms); }
-  function poll() { clearTimeout(pollTimer); pollTimer = setTimeout(function () { if (!document.hidden) sync(); poll(); }, POLL_MS); }
+  function schedule(ms) {
+    clearTimeout(debounce);
+    debounce = setTimeout(sync, ms == null ? 300 : ms);
+  }
+  function poll() {
+    clearTimeout(pollTimer);
+    pollTimer = setTimeout(function () {
+      if (!document.hidden) sync();
+      poll();
+    }, POLL_MS);
+  }
 
   /* ---------- mutations ---------- */
-  function byId(id) { id = Number(id); for (var i = 0; i < doc.tasks.length; i++) if (doc.tasks[i].id === id) return doc.tasks[i]; return null; }
-  function touch(t) { t.updatedAt = now(); t.deviceId = cfg.deviceId; meta.dirty = true; save(DOC_KEY, doc); save(META_KEY, meta); render(); schedule(); }
-  function addTask(raw, section) {
-    raw = raw.trim(); if (!raw) return;
-    var room = '', text = raw, m = raw.match(/^([^:]{1,60}):\s+(.+)$/);
-    if (m) { room = m[1].trim(); text = m[2].trim(); }
-    var max = NATIVE_MIN - 1; doc.tasks.forEach(function (t) { if (t.id > max && t.id >= NATIVE_MIN) max = t.id; });
-    var ts = now();
-    var t = { id: max + 1, label: String(max + 1), section: section, room: room, text: text, note: '', done: false, deleted: false, hidden: false, source: 'app', createdAt: ts, updatedAt: ts, deviceId: cfg.deviceId, _new: true };
-    doc.tasks.push(t); touch(t);
+
+  function byId(id) {
+    id = Number(id);
+    for (var i = 0; i < doc.tasks.length; i++) {
+      if (doc.tasks[i].id === id) return doc.tasks[i];
+    }
+    return null;
   }
-  function isHidden(t) { return !!t.hidden && (!t.hideUntilDate || t.hideUntilDate > todayIso()); }
-  function parseDate(s) { var m = String(s).match(/(\d{4})-(\d{2})-(\d{2})/); return m ? m[0] : null; }
+  function touch(t) {
+    t.updatedAt = Math.max(now(), (t.updatedAt || 0) + 1);
+    t.deviceId = cfg.deviceId;
+    doc.updatedAt = Math.max(doc.updatedAt || 0, t.updatedAt);
+    persist();
+    render();
+    if (syncing) again = true;
+    schedule();
+  }
+  function addTask(raw, section) {
+    raw = raw.trim();
+    if (!raw) return;
+    var room = '', text = raw;
+    var match = /^([^:]{1,60}):\s+(.+)$/.exec(raw);
+    if (match) {
+      room = match[1].trim();
+      text = match[2].trim();
+    }
+    var max = NATIVE_MIN - 1;
+    doc.tasks.forEach(function (t) {
+      if (t.id >= NATIVE_MIN && t.id > max) max = t.id;
+    });
+    var ts = now();
+    var task = {
+      id: max + 1,
+      label: String(max + 1),
+      section: section,
+      room: room,
+      text: text,
+      note: '',
+      tags: [],
+      done: false,
+      hidden: false,
+      deleted: false,
+      source: 'app',
+      createdAt: ts,
+      updatedAt: ts,
+      deviceId: cfg.deviceId,
+      _new: true,
+      _creator: cfg.deviceId
+    };
+    doc.tasks.push(task);
+    touch(task);
+  }
+  function isHidden(t) {
+    return !!t.hidden &&
+      (!t.hideUntilDate || t.hideUntilDate > todayIso());
+  }
 
   /* ---------- rendering ---------- */
-  function setStatus(kind, msg) { ui.status = kind; ui.msg = msg; var el = $('#sync'); if (el) { el.className = 'sync ' + kind; el.textContent = msg; } }
-  function toast(msg) { var el = $('#toast'); if (!el) return; el.textContent = msg; el.className = 'toast show'; clearTimeout(toast.t); toast.t = setTimeout(function () { el.className = 'toast'; }, 3000); }
 
+  function setStatus(kind, message) {
+    ui.status = kind;
+    ui.msg = message;
+    var el = $('#sync');
+    if (el) {
+      el.className = 'sync ' + kind;
+      el.textContent = message;
+    }
+  }
+  function toast(message) {
+    var el = $('#toast');
+    if (!el) return;
+    el.textContent = message;
+    el.className = 'toast show';
+    clearTimeout(toast.timer);
+    toast.timer = setTimeout(function () { el.className = 'toast'; }, 3000);
+  }
   function renderSetup(error) {
-    var app = $('#app');
-    app.innerHTML = '<div class="setup"><h1>Connect Tasks</h1>' +
-      '<p>Paste a GitHub token with access to the private data repo. It is stored only in this browser (localStorage) and sent only to api.github.com.</p>' +
-      '<label for="tok">GitHub token</label><input class="input" id="tok" type="password" autocomplete="off" autocapitalize="off" spellcheck="false">' +
-      '<label for="repo">Data repo (owner/name)</label><input class="input" id="repo" autocapitalize="off" spellcheck="false" value="' + esc(cfg.repo) + '">' +
+    ui.setup = true;
+    $('#app').innerHTML =
+      '<div class="setup"><h1>Connect Tasks</h1>' +
+      '<p>The token is stored in this browser and sent only to api.github.com. ' +
+      'Use a token with Contents read/write access to the private data repo.</p>' +
+      '<label for="tok">GitHub token</label>' +
+      '<input class="input" id="tok" type="password" autocomplete="off" ' +
+      'autocapitalize="off" spellcheck="false">' +
+      '<label for="repo">Data repo (owner/name)</label>' +
+      '<input class="input" id="repo" autocapitalize="off" spellcheck="false" ' +
+      'value="' + esc(cfg.repo) + '">' +
       '<p class="err" id="setupErr">' + esc(error || '') + '</p>' +
-      '<button class="btn primary" id="connect">Connect</button> ' + (cfg.token ? '<button class="btn" id="cancelSetup">Cancel</button> <button class="btn" id="forget">Forget token</button>' : '') + '</div>';
+      '<button class="btn primary" id="connect">Connect</button> ' +
+      (cfg.token ?
+        '<button class="btn" id="cancelSetup">Cancel</button> ' +
+        '<button class="btn" id="forget">Forget token</button>' : '') +
+      '</div>';
+
     $('#connect').onclick = async function () {
-      var tok = $('#tok').value.trim() || cfg.token, repo = $('#repo').value.trim();
-      if (!tok) { $('#setupErr').textContent = 'Token required'; return; }
+      var tok = $('#tok').value.trim() || cfg.token;
+      var repo = $('#repo').value.trim();
+      if (!tok) {
+        $('#setupErr').textContent = 'Token required';
+        return;
+      }
+      if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+        $('#setupErr').textContent = 'Use owner/repo';
+        return;
+      }
+      updateDirty();
+      if (repo !== cfg.repo && meta.dirty) {
+        $('#setupErr').textContent =
+          'Sync queued edits before switching repositories';
+        return;
+      }
+
       var old = { token: cfg.token, repo: cfg.repo };
-      cfg.token = tok; cfg.repo = repo;
+      var button = $('#connect');
+      button.disabled = true;
+      if ($('#cancelSetup')) $('#cancelSetup').disabled = true;
+      if ($('#forget')) $('#forget').disabled = true;
       $('#setupErr').textContent = 'Checking…';
+      cfg.token = tok;
+      cfg.repo = repo;
       try {
         await getRemote();
-        if (old.repo !== repo) { doc = { schema: 2, sections: SECTIONS.slice(), tasks: [], updatedAt: 0 }; meta = { sha: null, dirty: false, lastSync: 0 }; }
-        save(CFG_KEY, cfg); start();
+        save(CFG_KEY, cfg);
+        if (old.repo !== repo) {
+          doc = emptyDoc();
+          meta = { sha: null, dirty: false, lastSync: 0, base: emptyDoc() };
+        }
+        persist();
+        start();
       } catch (e) {
-        cfg.token = old.token; cfg.repo = old.repo;
-        $('#setupErr').textContent = e.status ? 'GitHub said ' + e.status + (e.status === 404 ? ' (repo not found or token lacks access)' : '') : 'Network error';
+        cfg.token = old.token;
+        cfg.repo = old.repo;
+        $('#setupErr').textContent = e.status ?
+          'GitHub said ' + e.status +
+          (e.status === 404 ? ' (repo not found or token lacks access)' : '') :
+          'Connection or browser storage failed';
+        button.disabled = false;
+        if ($('#cancelSetup')) $('#cancelSetup').disabled = false;
+        if ($('#forget')) $('#forget').disabled = false;
       }
     };
     if ($('#cancelSetup')) $('#cancelSetup').onclick = start;
-    if ($('#forget')) $('#forget').onclick = function () { localStorage.removeItem(CFG_KEY); localStorage.removeItem(DOC_KEY); localStorage.removeItem(META_KEY); location.reload(); };
+    if ($('#forget')) {
+      $('#forget').onclick = function () {
+        updateDirty();
+        if (meta.dirty &&
+            !confirm('Forget this connection and discard queued edits?')) return;
+        try {
+          localStorage.removeItem(CFG_KEY);
+          localStorage.removeItem(DOC_KEY);
+          localStorage.removeItem(OLD_META_KEY);
+          location.reload();
+        } catch (e) {
+          $('#setupErr').textContent = 'Browser storage failed';
+        }
+      };
+    }
   }
-
   function renderShell() {
     $('#app').innerHTML =
-      '<header class="top"><div class="row1"><h1>Tasks</h1><span class="count" id="count"></span><span class="spacer"></span>' +
-      '<span class="sync" id="sync"></span><button class="btn small" id="syncNow" title="Sync now">↻</button> <button class="btn small" id="settings" title="Settings">⚙</button></div>' +
-      '<form class="add" id="add" autocomplete="off"><input class="input" id="addText" placeholder="New task (Room: text)"><select class="select" id="addSec"></select><button class="btn primary">Add</button></form>' +
-      '<div class="tools"><input class="input" id="q" type="search" placeholder="Search"><label><input type="checkbox" id="showHidden"> hidden</label></div></header>' +
-      '<main id="list"></main><div class="toast" id="toast"></div>';
-    $('#addSec').innerHTML = doc.sections.map(function (s) { return '<option value="' + esc(s.id) + '">' + esc(s.name) + '</option>'; }).join('');
-    $('#add').onsubmit = function (e) { e.preventDefault(); addTask($('#addText').value, $('#addSec').value); $('#addText').value = ''; };
-    $('#q').oninput = function () { ui.query = this.value.toLowerCase(); render(); };
-    $('#showHidden').onchange = function () { ui.showHidden = this.checked; render(); };
+      '<header class="top"><div class="row1"><h1>Tasks</h1>' +
+      '<span class="count" id="count"></span><span class="spacer"></span>' +
+      '<span class="sync" id="sync"></span>' +
+      '<button class="btn small" id="syncNow" title="Sync now">↻</button> ' +
+      '<button class="btn small" id="settings" title="Settings">⚙</button>' +
+      '</div><form class="add" id="add" autocomplete="off">' +
+      '<input class="input" id="addText" placeholder="New task (Room: text)">' +
+      '<select class="select" id="addSec"></select>' +
+      '<button class="btn primary">Add</button></form>' +
+      '<div class="tools"><input class="input" id="q" type="search" ' +
+      'placeholder="Search"><label><input type="checkbox" id="showHidden">' +
+      ' hidden</label></div></header><main id="list"></main>' +
+      '<div class="toast" id="toast"></div>';
+
+    $('#q').value = ui.query;
+    $('#showHidden').checked = ui.showHidden;
+    $('#add').onsubmit = function (e) {
+      e.preventDefault();
+      addTask($('#addText').value, $('#addSec').value);
+      $('#addText').value = '';
+    };
+    $('#q').oninput = function () {
+      ui.query = this.value.toLowerCase();
+      render();
+    };
+    $('#showHidden').onchange = function () {
+      ui.showHidden = this.checked;
+      render();
+    };
     $('#syncNow').onclick = function () { sync(); };
-    $('#settings').onclick = function () { renderSetup(''); };
+    $('#settings').onclick = function () {
+      if (syncing) {
+        toast('Wait for the current sync before changing the connection');
+        return;
+      }
+      renderSetup('');
+    };
     $('#list').addEventListener('click', onListClick);
     $('#list').addEventListener('change', onListChange);
     setStatus(ui.status === 'idle' ? 'busy' : ui.status, ui.msg || 'Loading…');
   }
-
   function taskHtml(t) {
-    var cls = 'task' + (t.done ? ' done' : '') + (isHidden(t) ? ' hid' : '') + (ui.open[t.id] ? ' open' : '');
-    var metaBits = [];
-    if (isHidden(t)) metaBits.push('hidden until ' + (t.hideUntil || t.hideUntilDate));
-    if (t.logged) metaBits.push('logged ' + t.logged);
-    return '<li class="' + cls + '" data-id="' + t.id + '"><input type="checkbox"' + (t.done ? ' checked' : '') + ' aria-label="Done #' + esc(t.label || t.id) + '">' +
-      '<div class="body"><span class="badge">#' + esc(t.label || t.id) + '</span>' + (t.room ? '<span class="room">' + esc(t.room) + ':</span> ' : '') + '<span class="txt">' + esc(t.text) + '</span>' +
-      (metaBits.length ? '<span class="meta">' + esc(metaBits.join(' · ')) + '</span>' : '') +
+    var cls = 'task' + (t.done ? ' done' : '') +
+      (isHidden(t) ? ' hid' : '') + (ui.open[t.id] ? ' open' : '');
+    var bits = [];
+    if (isHidden(t)) {
+      bits.push('hidden until ' + (t.hideUntil || t.hideUntilDate || 'a trigger'));
+    }
+    if (t.logged) bits.push('logged ' + t.logged);
+    return '<li class="' + cls + '" data-id="' + esc(t.id) + '">' +
+      '<input type="checkbox"' + (t.done ? ' checked' : '') +
+      ' aria-label="Done #' + esc(t.label || t.id) + '">' +
+      '<div class="body"><span class="badge">#' +
+      esc(t.label || t.id) + '</span>' +
+      (t.room ? '<span class="room">' + esc(t.room) + ':</span> ' : '') +
+      '<span class="txt">' + esc(t.text) + '</span>' +
+      (bits.length ? '<span class="meta">' +
+        esc(bits.join(' · ')) + '</span>' : '') +
       '<div class="note">' + esc(t.note || '') + '</div>' +
-      '<div class="acts"><button class="btn small" data-act="edit">Edit</button><button class="btn small" data-act="note">Note</button>' +
-      '<button class="btn small" data-act="hide">' + (isHidden(t) ? 'Unhide' : 'Hide until…') + '</button><button class="btn small" data-act="move">Move</button><button class="btn small" data-act="del">Delete</button></div></div></li>';
+      '<div class="acts">' +
+      '<button class="btn small" data-act="edit">Edit</button>' +
+      '<button class="btn small" data-act="note">Note</button>' +
+      '<button class="btn small" data-act="hide">' +
+      (isHidden(t) ? 'Unhide' : 'Hide until…') + '</button>' +
+      '<button class="btn small" data-act="move">Move</button>' +
+      '<button class="btn small" data-act="del">Delete</button>' +
+      '</div></div></li>';
   }
-
   function render() {
-    var list = $('#list'); if (!list) return;
+    var list = $('#list');
+    if (!list) return;
+
+    var select = $('#addSec'), previous = select.value;
+    select.innerHTML = doc.sections.map(function (s) {
+      return '<option value="' + esc(s.id) + '">' + esc(s.name) + '</option>';
+    }).join('');
+    if (doc.sections.some(function (s) { return s.id === previous; })) {
+      select.value = previous;
+    }
+
     var q = ui.query, active = 0, hiddenN = 0;
     var html = doc.sections.map(function (s) {
-      var ts = doc.tasks.filter(function (t) { return !t.deleted && t.section === s.id; });
-      var vis = ts.filter(function (t) {
-        if (isHidden(t) && !t.done) { hiddenN++; if (!ui.showHidden) return false; }
+      var visible = doc.tasks.filter(function (t) {
+        if (t.deleted || t.section !== s.id) return false;
+        if (isHidden(t)) {
+          hiddenN += 1;
+          if (!ui.showHidden) return false;
+        }
         if (!q) return true;
-        return ('#' + (t.label || t.id) + ' ' + (t.room || '') + ' ' + t.text + ' ' + (t.note || '')).toLowerCase().indexOf(q) !== -1;
+        return ('#' + (t.label || t.id) + ' ' + (t.room || '') +
+          ' ' + (t.text || '') + ' ' + (t.note || '') +
+          ' ' + (t.tags || []).join(' ')).toLowerCase().indexOf(q) !== -1;
       });
-      var open = vis.filter(function (t) { return !t.done; }), done = vis.filter(function (t) { return t.done; });
+      var open = visible.filter(function (t) { return !t.done; });
+      var done = visible.filter(function (t) { return t.done; });
       active += open.length;
-      done.sort(function (a, b) { return (b.doneAt || b.updatedAt) - (a.doneAt || a.updatedAt); });
+      done.sort(function (a, b) {
+        return (b.doneAt || b.updatedAt || 0) -
+          (a.doneAt || a.updatedAt || 0);
+      });
       if (!open.length && !done.length) return '';
-      return '<section class="sec"><h2>' + esc(s.name) + ' <span>' + open.length + '</span></h2><ul>' + open.map(taskHtml).join('') + '</ul>' +
-        (done.length ? '<details' + (q ? ' open' : '') + '><summary>Done (' + done.length + ')</summary><ul>' + done.map(taskHtml).join('') + '</ul></details>' : '') + '</section>';
+      return '<section class="sec"><h2>' + esc(s.name) + ' <span>' +
+        open.length + '</span></h2><ul>' + open.map(taskHtml).join('') +
+        '</ul>' + (done.length ?
+          '<details' + (q ? ' open' : '') + '><summary>Done (' +
+          done.length + ')</summary><ul>' +
+          done.map(taskHtml).join('') + '</ul></details>' : '') +
+        '</section>';
     }).join('');
     list.innerHTML = html || '<p class="empty">No tasks.</p>';
-    $('#count').textContent = active + ' open' + (hiddenN ? ' · ' + hiddenN + ' hidden' : '');
+    $('#count').textContent = active + ' open' +
+      (hiddenN ? ' · ' + hiddenN + ' hidden' : '');
   }
-
   function onListChange(e) {
     if (e.target.type !== 'checkbox') return;
-    var t = byId(e.target.closest('li').getAttribute('data-id')); if (!t) return;
-    t.done = e.target.checked; if (t.done) t.doneAt = now(); else delete t.doneAt;
+    var li = e.target.closest('li.task');
+    if (!li) return;
+    var t = byId(li.getAttribute('data-id'));
+    if (!t || t.deleted) return;
+    t.done = e.target.checked;
+    if (t.done) t.doneAt = now();
+    else delete t.doneAt;
     touch(t);
   }
   function onListClick(e) {
-    var li = e.target.closest('li.task'); if (!li || e.target.type === 'checkbox') return;
-    var t = byId(li.getAttribute('data-id')); if (!t) return;
-    var btn = e.target.closest('button'), act = btn && btn.getAttribute('data-act'), v;
-    if (!act) { ui.open[t.id] = !ui.open[t.id]; render(); return; }
-    if (act === 'edit') { v = prompt('Edit task', (t.room ? t.room + ': ' : '') + t.text); if (v != null && v.trim()) { var m = v.trim().match(/^([^:]{1,60}):\s+(.+)$/); if (m) { t.room = m[1].trim(); t.text = m[2].trim(); } else { t.room = ''; t.text = v.trim(); } touch(t); } }
-    else if (act === 'note') { v = prompt('Note', t.note || ''); if (v != null) { t.note = v; touch(t); } }
-    else if (act === 'hide') {
-      if (isHidden(t)) { t.hidden = false; delete t.hideUntil; delete t.hideUntilDate; touch(t); }
-      else { v = prompt('Hide until (YYYY-MM-DD or a trigger)', ''); if (v != null && v.trim()) { t.hidden = true; t.hideUntil = v.trim(); var d = parseDate(v); if (d) t.hideUntilDate = d; else delete t.hideUntilDate; touch(t); } }
+    var li = e.target.closest('li.task');
+    if (!li || e.target.type === 'checkbox') return;
+    var t = byId(li.getAttribute('data-id'));
+    if (!t || t.deleted) return;
+    var button = e.target.closest('button');
+    var action = button && button.getAttribute('data-act');
+    var value, match;
+    if (!action) {
+      ui.open[t.id] = !ui.open[t.id];
+      render();
+      return;
     }
-    else if (act === 'move') { v = prompt('Move to section: ' + doc.sections.map(function (s) { return s.id; }).join(', '), t.section); if (v && doc.sections.some(function (s) { return s.id === v.trim(); })) { t.section = v.trim(); touch(t); } }
-    else if (act === 'del') { if (confirm('Delete #' + (t.label || t.id) + '?')) { t.deleted = true; touch(t); toast('Deleted #' + (t.label || t.id)); } }
+    if (action === 'edit') {
+      value = prompt('Edit task', (t.room ? t.room + ': ' : '') + t.text);
+      if (value != null && value.trim()) {
+        match = /^([^:]{1,60}):\s+(.+)$/.exec(value.trim());
+        t.room = match ? match[1].trim() : '';
+        t.text = match ? match[2].trim() : value.trim();
+        touch(t);
+      }
+    } else if (action === 'note') {
+      value = prompt('Note', t.note || '');
+      if (value != null) {
+        t.note = value;
+        touch(t);
+      }
+    } else if (action === 'hide') {
+      if (isHidden(t)) {
+        t.hidden = false;
+        delete t.hideUntil;
+        delete t.hideUntilDate;
+        touch(t);
+      } else {
+        value = prompt('Hide until (YYYY-MM-DD or a trigger)', '');
+        if (value != null && value.trim()) {
+          value = value.trim();
+          var date = parseDate(value);
+          if (/^\d{4}-\d{2}-\d{2}$/.test(value) && !date) {
+            toast('Invalid calendar date');
+            return;
+          }
+          t.hidden = true;
+          t.hideUntil = value;
+          if (date) t.hideUntilDate = date;
+          else delete t.hideUntilDate;
+          touch(t);
+        }
+      }
+    } else if (action === 'move') {
+      value = prompt('Move to section: ' + doc.sections.map(function (s) {
+        return s.id;
+      }).join(', '), t.section);
+      if (value && doc.sections.some(function (s) {
+        return s.id === value.trim();
+      })) {
+        t.section = value.trim();
+        touch(t);
+      }
+    } else if (action === 'del') {
+      if (confirm('Delete #' + (t.label || t.id) + '?')) {
+        t.deleted = true;
+        touch(t);
+        toast('Deleted #' + (t.label || t.id));
+      }
+    }
   }
 
   /* ---------- boot ---------- */
+
   var wired = false;
   function start() {
-    if (!cfg.token) { renderSetup(''); return; }
-    renderShell(); render(); sync(); poll();
+    if (!cfg.token) {
+      renderSetup('');
+      return;
+    }
+    ui.setup = false;
+    renderShell();
+    render();
+    sync();
+    poll();
     if (!wired) {
       wired = true;
-      document.addEventListener('visibilitychange', function () { if (!document.hidden && cfg.token) sync(); });
-      window.addEventListener('online', function () { if (cfg.token) sync(); });
-      window.addEventListener('focus', function () { if (cfg.token) schedule(100); });
+      document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) sync();
+      });
+      window.addEventListener('online', function () { sync(); });
+      window.addEventListener('focus', function () { schedule(100); });
     }
   }
-  window.__tasks = { sync: sync, state: function () { return { doc: doc, meta: meta, ui: ui }; } };
-  if ('serviceWorker' in navigator) window.addEventListener('load', function () { navigator.serviceWorker.register('./sw.js').catch(function () {}); });
+
+  try {
+    save(CFG_KEY, cfg);
+  } catch (e) {
+    storageError = 'Browser storage failed; connection cannot be saved';
+  }
+  persist();
+
+  window.__tasks = {
+    sync: sync,
+    state: function () {
+      return clone({ doc: doc, meta: meta, ui: ui });
+    }
+  };
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('./sw.js').catch(function () {});
+    });
+  }
   start();
 })();
