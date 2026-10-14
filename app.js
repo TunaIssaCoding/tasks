@@ -708,7 +708,7 @@
     var id = drag.id;
     var before = drag.before;
     var isGroup = target && target.getAttribute('data-trigger') != null;
-    var section = isGroup ? 'triggers' :
+    var section = isGroup ? (target.getAttribute('data-gsec') || 'triggers') :
       target && target.getAttribute('data-sec');
     var trigger = isGroup ? target.getAttribute('data-trigger') : null;
     resetDrag();
@@ -719,8 +719,8 @@
     var t = byId(id);
     if (!t || t.deleted || !section) return;
     if (isGroup) {
-      if (t.section === 'triggers' && triggerLabel(t) === trigger) return;
-      t.section = 'triggers';
+      if (t.section === section && triggerLabel(t) === trigger) return;
+      t.section = section;
       t.sectionManual = true;
       if (trigger) t.trigger = trigger;
       else delete t.trigger;
@@ -1047,7 +1047,7 @@
       '<span class="owner ' + esc(owner.cls) + '">' +
       esc(owner.label) + '</span>' +
       '<span class="main">' +
-      (trig && t.section !== 'triggers' ?
+      (trig && t.section !== 'triggers' && t.done ?
         '<span class="trig">' + esc(trig) + '</span>' : '') +
       '<span class="txt">' + esc(title) + '</span></span>' +
       (expanded ? '<div class="note">' + esc(expanded) + '</div>' : '') +
@@ -1061,6 +1061,32 @@
       moveOptions(t.section) + '</select></label>' +
       '<button class="btn small" data-act="del">Delete</button>' +
       '</div></div></li>';
+  }
+  function sectionGroupsHtml(sid, open) {
+    var plain = [], groups = Object.create(null), keys, html;
+    open.forEach(function (t) {
+      var label = triggerLabel(t);
+      if (!label) { plain.push(t); return; }
+      if (!groups[label]) groups[label] = [];
+      groups[label].push(t);
+    });
+    html = '<ul>' + plain.map(taskHtml).join('') +
+      (open.length ? '' : '<li class="drop-here">Drop here</li>') + '</ul>';
+    keys = Object.keys(groups).sort(function (a, b) {
+      return a.toLowerCase() < b.toLowerCase() ? -1 : a.toLowerCase() > b.toLowerCase() ? 1 : 0;
+    });
+    keys.forEach(function (key) {
+      var ck = sid + '\u0001' + key, tasks = groups[key];
+      var collapsed = !!ui.collapsedTriggers[ck];
+      html += '<div class="tgroup' + (collapsed ? ' collapsed' : '') +
+        '" data-trigger="' + esc(key) + '" data-gsec="' + esc(sid) + '">' +
+        '<button type="button" class="tgroup-h">' +
+        '<span class="caret">' + (collapsed ? '▸' : '▾') + '</span>' +
+        '<span class="tlabel">' + esc(key) + '</span>' +
+        '<span class="tcount">' + tasks.length + '</span></button>' +
+        '<ul>' + tasks.map(taskHtml).join('') + '</ul></div>';
+    });
+    return html;
   }
   function triggerGroupsHtml(open) {
     var dragging = (' ' + document.body.className + ' ').indexOf(' dragging ') !== -1;
@@ -1153,8 +1179,7 @@
       return '<section class="sec" data-sec="' + esc(s.id) + '"><h2>' +
         esc(s.name) + ' <span>' + open.length + '</span></h2>' +
         (s.id === 'triggers' ? triggerGroupsHtml(open) :
-          '<ul>' + open.map(taskHtml).join('') +
-          (open.length ? '' : '<li class="drop-here">Drop here</li>') + '</ul>') +
+          sectionGroupsHtml(s.id, open)) +
         (done.length ?
           '<details' + (q ? ' open' : '') + '><summary>Done (' +
           done.length + ')</summary><ul>' +
@@ -1190,6 +1215,8 @@
     if (h) {
       var group = h.closest('.tgroup');
       var label = group ? group.getAttribute('data-trigger') : '';
+      var gsec = group && group.getAttribute('data-gsec');
+      if (gsec) label = gsec + '\u0001' + label;
       ui.collapsedTriggers[label] = !ui.collapsedTriggers[label];
       if (!ui.collapsedTriggers[label]) delete ui.collapsedTriggers[label];
       persistUi();
