@@ -278,6 +278,7 @@
       method: method,
       cache: 'no-store',
       credentials: 'omit',
+      redirect: 'error',
       /* Stable URLs + no cache-buster so the browser can reuse the CORS preflight; no-store prevents stale reads. */
       headers: body ? {
         'Authorization': 'token ' + cfg.token,
@@ -368,6 +369,7 @@
         if (response.ok) {
           var result = await response.json();
           meta.base = published;
+          if (!result || !result.content || !result.content.sha) throw apiError('PUT', response.status);
           meta.sha = result.content.sha;
           acknowledge(published);
 
@@ -381,6 +383,7 @@
         }
         if (response.status === 409 || response.status === 422 ||
             response.status >= 500) {
+          try { await response.text(); } catch (ignore) { /* drain so old Safari frees the connection */ }
           if (attempt < 5) await delay(400 * (attempt + 1));
           continue;
         }
@@ -445,7 +448,14 @@
     }
     return null;
   }
-  function touch(t) {
+  /* Signature of user-visible fields; a no-op edit (e.g. dismissed prompt) must not win LWW. */
+  function taskSig(t) {
+    var c = {}, k;
+    for (k in t) if (k !== 'updatedAt' && k !== 'deviceId' && k.charAt(0) !== '_') c[k] = t[k];
+    return JSON.stringify(c, Object.keys(c).sort());
+  }
+  function touch(t, before) {
+    if (before != null && taskSig(t) === before) return;
     t.updatedAt = Math.max(now(), (t.updatedAt || 0) + 1);
     t.deviceId = cfg.deviceId;
     doc.updatedAt = Math.max(doc.updatedAt || 0, t.updatedAt);
@@ -730,6 +740,7 @@
     var button = e.target.closest('button');
     var action = button && button.getAttribute('data-act');
     var value, match;
+    var before = taskSig(t);
     if (!action) {
       ui.open[t.id] = !ui.open[t.id];
       render();
@@ -741,20 +752,20 @@
         match = /^([^:]{1,60}):\s+(.+)$/.exec(value.trim());
         t.room = match ? match[1].trim() : '';
         t.text = match ? match[2].trim() : value.trim();
-        touch(t);
+        touch(t, before);
       }
     } else if (action === 'note') {
       value = prompt('Note', t.note || '');
       if (value != null) {
         t.note = value;
-        touch(t);
+        touch(t, before);
       }
     } else if (action === 'hide') {
       if (isHidden(t)) {
         t.hidden = false;
         delete t.hideUntil;
         delete t.hideUntilDate;
-        touch(t);
+        touch(t, before);
       } else {
         value = prompt('Hide until (YYYY-MM-DD or a trigger)', '');
         if (value != null && value.trim()) {
@@ -768,7 +779,7 @@
           t.hideUntil = value;
           if (date) t.hideUntilDate = date;
           else delete t.hideUntilDate;
-          touch(t);
+          touch(t, before);
         }
       }
     } else if (action === 'move') {
@@ -779,12 +790,12 @@
         return s.id === value.trim();
       })) {
         t.section = value.trim();
-        touch(t);
+        touch(t, before);
       }
     } else if (action === 'del') {
       if (confirm('Delete #' + (t.label || t.id) + '?')) {
         t.deleted = true;
-        touch(t);
+        touch(t, before);
         toast('Deleted #' + (t.label || t.id));
       }
     }
