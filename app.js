@@ -210,6 +210,9 @@
     showHidden: !!storedUi.showHidden,
     ownerFilter: /^(all|you|chase|waiting)$/.test(storedUi.ownerFilter) ?
       storedUi.ownerFilter : 'all',
+    collapsedTriggers: storedUi.collapsedTriggers &&
+      typeof storedUi.collapsedTriggers === 'object' ?
+      storedUi.collapsedTriggers : {},
     open: {}, status: 'idle', msg: '', setup: false
   };
   var syncing = false, again = false, pollTimer = 0, debounce = 0;
@@ -219,7 +222,8 @@
       save(UI_KEY, {
         query: ui.query,
         showHidden: ui.showHidden,
-        ownerFilter: ui.ownerFilter
+        ownerFilter: ui.ownerFilter,
+        collapsedTriggers: ui.collapsedTriggers
       });
     } catch (e) {}
   }
@@ -555,6 +559,293 @@
     return !!t.hidden &&
       (!t.hideUntilDate || t.hideUntilDate > todayIso());
   }
+  function triggerLabel(t) {
+    return String(t.trigger || '').trim();
+  }
+
+  /* ---------- drag ---------- */
+
+  var drag = {
+    active: false,
+    press: false,
+    pointerId: null,
+    kind: '',
+    id: null,
+    li: null,
+    ghost: null,
+    startX: 0,
+    startY: 0,
+    x: 0,
+    y: 0,
+    raf: 0,
+    scrollRaf: 0,
+    target: null,
+    timer: 0,
+    before: null
+  };
+  var swallowClick = false;
+
+  function isInteractive(el) {
+    return !!(el && el.closest('button,input,select,textarea,label,a'));
+  }
+  function pointFromTouch(e) {
+    var t = e.changedTouches && e.changedTouches[0];
+    if (!t && e.touches) t = e.touches[0];
+    return t ? { x: t.clientX, y: t.clientY } : null;
+  }
+  function clearDropTarget() {
+    if (drag.target) {
+      drag.target.className = drag.target.className.replace(/\s*drop-target/g, '');
+      drag.target = null;
+    }
+  }
+  function setDropTarget(sec) {
+    if (sec === drag.target) return;
+    clearDropTarget();
+    if (sec) {
+      drag.target = sec;
+      if ((' ' + sec.className + ' ').indexOf(' drop-target ') === -1) {
+        sec.className += ' drop-target';
+      }
+    }
+  }
+  function dragSectionAt(x, y) {
+    var el = document.elementFromPoint(x, y);
+    var group = el && el.closest ? el.closest('.tgroup[data-trigger]') : null;
+    if (group) return group;
+    var sec = el && el.closest ? el.closest('.sec[data-sec]') : null;
+    return sec;
+  }
+  function updateGhost() {
+    drag.raf = 0;
+    if (!drag.active || !drag.ghost) return;
+    drag.ghost.style.webkitTransform = 'translate3d(' + drag.x + 'px,' + drag.y + 'px,0)';
+    drag.ghost.style.transform = 'translate3d(' + drag.x + 'px,' + drag.y + 'px,0)';
+    setDropTarget(dragSectionAt(drag.x, drag.y));
+  }
+  function scheduleGhost() {
+    if (!drag.raf) drag.raf = requestAnimationFrame(updateGhost);
+  }
+  function autoScroll() {
+    var h = window.innerHeight || document.documentElement.clientHeight || 0;
+    var edge = 60, speed = 0;
+    if (drag.active && h) {
+      if (drag.y < edge) speed = -Math.ceil((edge - drag.y) / edge * 18);
+      else if (drag.y > h - edge) speed = Math.ceil((drag.y - (h - edge)) / edge * 18);
+      if (speed) { window.scrollBy(0, speed); scheduleGhost(); }
+    }
+    if (drag.active) drag.scrollRaf = requestAnimationFrame(autoScroll);
+    else drag.scrollRaf = 0;
+  }
+  function startDrag() {
+    if (!drag.press || drag.active || !drag.li) return;
+    var t = byId(drag.id);
+    if (!t || t.deleted) return;
+    drag.active = true;
+    drag.before = taskSig(t);
+    document.body.className +=
+      (document.body.className ? ' ' : '') + 'dragging';
+    drag.allowRender = true;
+    render();
+    drag.allowRender = false;
+    drag.li = $('#list li.task[data-id="' + esc(drag.id) + '"]');
+    if (!drag.li) {
+      resetDrag();
+      return;
+    }
+    drag.li.className += ' dragging-source';
+    drag.ghost = drag.li.cloneNode(true);
+    drag.ghost.className += ' drag-ghost';
+    drag.ghost.style.left = '0';
+    drag.ghost.style.top = '0';
+    drag.ghost.style.width = drag.li.offsetWidth + 'px';
+    drag.ghost.style.webkitTransform = 'translate3d(' + drag.x + 'px,' + drag.y + 'px,0)';
+    drag.ghost.style.transform = 'translate3d(' + drag.x + 'px,' + drag.y + 'px,0)';
+    document.body.appendChild(drag.ghost);
+    if (navigator.vibrate && drag.kind !== 'mouse') navigator.vibrate(10);
+    scheduleGhost();
+    if (!drag.scrollRaf) drag.scrollRaf = requestAnimationFrame(autoScroll);
+  }
+  function onTargetTouchMove(e) { e.stopPropagation(); touchMove(e); }
+  function onTargetTouchEnd(e) {
+    e.stopPropagation();
+    if (drag.press && drag.kind === 'touch') finishDrag(e.type === 'touchcancel');
+  }
+  function unbindTouchTarget() {
+    var el = drag.touchEl;
+    if (!el) return;
+    drag.touchEl = null;
+    el.removeEventListener('touchmove', onTargetTouchMove, { passive: false });
+    el.removeEventListener('touchend', onTargetTouchEnd);
+    el.removeEventListener('touchcancel', onTargetTouchEnd);
+  }
+  function resetDrag() {
+    var wasActive = drag.active;
+    unbindTouchTarget();
+    clearTimeout(drag.timer);
+    if (drag.raf) cancelAnimationFrame(drag.raf);
+    if (drag.scrollRaf) cancelAnimationFrame(drag.scrollRaf);
+    if (drag.ghost && drag.ghost.parentNode) drag.ghost.parentNode.removeChild(drag.ghost);
+    if (drag.li) drag.li.className = drag.li.className.replace(/\s*dragging-source/g, '');
+    document.body.className = document.body.className.replace(/\s*dragging/g, '');
+    clearDropTarget();
+    drag.active = false;
+    drag.press = false;
+    drag.pointerId = null;
+    drag.kind = '';
+    drag.id = null;
+    drag.li = null;
+    drag.ghost = null;
+    drag.raf = 0;
+    drag.scrollRaf = 0;
+    drag.timer = 0;
+    drag.before = null;
+    if (wasActive) render();
+  }
+  function finishDrag(cancel) {
+    var wasActive = drag.active;
+    var target = drag.target;
+    var id = drag.id;
+    var before = drag.before;
+    var isGroup = target && target.getAttribute('data-trigger') != null;
+    var section = isGroup ? 'triggers' :
+      target && target.getAttribute('data-sec');
+    var trigger = isGroup ? target.getAttribute('data-trigger') : null;
+    resetDrag();
+    if (!wasActive) return;
+    swallowClick = true;
+    setTimeout(function () { swallowClick = false; }, 350);
+    if (cancel || !target) return;
+    var t = byId(id);
+    if (!t || t.deleted || !section) return;
+    if (isGroup) {
+      if (t.section === 'triggers' && triggerLabel(t) === trigger) return;
+      t.section = 'triggers';
+      t.sectionManual = true;
+      if (trigger) t.trigger = trigger;
+      else delete t.trigger;
+      t.triggerManual = true;
+      touch(t, before);
+      return;
+    }
+    if (section === t.section) return;
+    t.section = section;
+    t.sectionManual = true;
+    touch(t, before);
+  }
+  function beginPress(li, x, y, kind, pointerId) {
+    if (drag.press || drag.active) resetDrag();
+    drag.press = true;
+    drag.pointerId = pointerId;
+    drag.kind = kind;
+    drag.id = li.getAttribute('data-id');
+    drag.li = li;
+    drag.startX = x;
+    drag.startY = y;
+    drag.x = x;
+    drag.y = y;
+    if (kind !== 'mouse') {
+      drag.timer = setTimeout(startDrag, 250);
+    }
+  }
+  function movePress(x, y, e) {
+    if (!drag.press) return;
+    drag.x = x;
+    drag.y = y;
+    var dx = x - drag.startX, dy = y - drag.startY;
+    var dist = Math.sqrt(dx * dx + dy * dy);
+    if (drag.active) {
+      if (e && e.cancelable) e.preventDefault();
+      scheduleGhost();
+      return;
+    }
+    if (drag.kind === 'mouse') {
+      if (dist > 5) startDrag();
+    } else if (dist > 8) {
+      resetDrag();
+    }
+  }
+  function pointerDown(e) {
+    if (e.button != null && e.button !== 0) return;
+    var li = e.target.closest && e.target.closest('li.task');
+    if (!li || isInteractive(e.target)) return;
+    /* Touch uses touch events (non-passive touchmove) so a long-press drag can block scrolling on iOS. */
+    if (e.pointerType === 'touch') return;
+    beginPress(li, e.clientX, e.clientY,
+      e.pointerType === 'mouse' || !e.pointerType ? 'mouse' : 'touch',
+      e.pointerId);
+  }
+  function pointerMove(e) {
+    if (!drag.press || drag.pointerId !== e.pointerId) return;
+    movePress(e.clientX, e.clientY, e);
+  }
+  function pointerUp(e) {
+    if (!drag.press || drag.pointerId !== e.pointerId) return;
+    finishDrag(false);
+  }
+  function touchStart(e) {
+    if (e.touches && e.touches.length > 1) return;
+    var li = e.target.closest && e.target.closest('li.task');
+    var p = pointFromTouch(e);
+    if (!li || !p || isInteractive(e.target)) return;
+    beginPress(li, p.x, p.y, 'touch', null);
+    /* Listen on the touched node itself so moves still arrive if it gets detached. */
+    drag.touchEl = e.target;
+    e.target.addEventListener('touchmove', onTargetTouchMove, { passive: false });
+    e.target.addEventListener('touchend', onTargetTouchEnd);
+    e.target.addEventListener('touchcancel', onTargetTouchEnd);
+  }
+  function touchMove(e) {
+    var p = pointFromTouch(e);
+    if (!p) return;
+    movePress(p.x, p.y, e);
+  }
+  function mouseDown(e) {
+    pointerDown(e);
+  }
+  function mouseMove(e) {
+    if (!drag.press || drag.kind !== 'mouse') return;
+    movePress(e.clientX, e.clientY, e);
+  }
+  function mouseUp() {
+    if (!drag.press || drag.kind !== 'mouse') return;
+    finishDrag(false);
+  }
+  function wireDrag() {
+    var list = $('#list');
+    if (!list) return;
+    list.addEventListener('touchstart', touchStart, { passive: true });
+    document.addEventListener('touchmove', touchMove, { passive: false });
+    document.addEventListener('touchend', function () { if (drag.press && drag.kind === 'touch') finishDrag(false); });
+    document.addEventListener('touchcancel', function () { if (drag.press && drag.kind === 'touch') finishDrag(true); });
+    if (window.PointerEvent) {
+      list.addEventListener('pointerdown', pointerDown);
+      document.addEventListener('pointermove', pointerMove);
+      document.addEventListener('pointerup', pointerUp);
+      document.addEventListener('pointercancel', function (e) {
+        if (drag.press && drag.pointerId === e.pointerId) finishDrag(true);
+      });
+    } else {
+      list.addEventListener('mousedown', mouseDown);
+      document.addEventListener('mousemove', mouseMove);
+      document.addEventListener('mouseup', mouseUp);
+    }
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && drag.press) finishDrag(true);
+    });
+    document.addEventListener('click', function (e) {
+      if (!swallowClick) return;
+      swallowClick = false;
+      e.preventDefault();
+      e.stopPropagation();
+    }, true);
+    document.addEventListener('contextmenu', function (e) {
+      if (drag.press || drag.active ||
+          (e.target.closest && e.target.closest('li.task'))) {
+        e.preventDefault();
+      }
+    });
+  }
 
   /* ---------- rendering ---------- */
 
@@ -723,8 +1014,16 @@
     };
     $('#list').addEventListener('click', onListClick);
     $('#list').addEventListener('change', onListChange);
+    wireDrag();
     updateOwnerChips();
     setStatus(ui.status === 'idle' ? 'busy' : ui.status, ui.msg || 'Loading…');
+  }
+  function moveOptions(current) {
+    return doc.sections.map(function (s) {
+      return '<option value="' + esc(s.id) + '"' +
+        (s.id === current ? ' selected' : '') + '>' +
+        esc(s.name) + '</option>';
+    }).join('');
   }
   function taskHtml(t) {
     var hidden = isHidden(t);
@@ -739,6 +1038,7 @@
     var expanded = [detail, note].filter(function (value) {
       return value;
     }).join('\n');
+    var trig = triggerLabel(t);
     return '<li class="' + cls + '" data-id="' + esc(t.id) + '">' +
       '<input type="checkbox"' + (t.done ? ' checked' : '') +
       ' aria-label="Done #' + esc(t.label || t.id) + '">' +
@@ -746,20 +1046,74 @@
       esc(t.label || t.id) + '</span>' +
       '<span class="owner ' + esc(owner.cls) + '">' +
       esc(owner.label) + '</span>' +
+      (trig && t.section !== 'triggers' ?
+        '<span class="trig">' + esc(trig) + '</span>' : '') +
       '<span class="txt">' + esc(title) + '</span>' +
       (expanded ? '<div class="note">' + esc(expanded) + '</div>' : '') +
       '<div class="acts">' +
       '<button class="btn small" data-act="edit">Edit</button>' +
       '<button class="btn small" data-act="note">Note</button>' +
+      '<button class="btn small" data-act="trigger">Trigger</button>' +
       '<button class="btn small" data-act="hide">' +
       (hidden ? 'Unhide' : 'Hide until…') + '</button>' +
-      '<button class="btn small" data-act="move">Move</button>' +
+      '<label class="move-label">Move to <select class="select small move-sel">' +
+      moveOptions(t.section) + '</select></label>' +
       '<button class="btn small" data-act="del">Delete</button>' +
       '</div></div></li>';
+  }
+  function triggerGroupsHtml(open) {
+    var dragging = (' ' + document.body.className + ' ').indexOf(' dragging ') !== -1;
+    var labels = Object.create(null);
+    var groups = Object.create(null);
+    var i, label, keys, html = '';
+
+    for (i = 0; i < open.length; i++) {
+      label = triggerLabel(open[i]);
+      labels[label] = true;
+      if (!groups[label]) groups[label] = [];
+      groups[label].push(open[i]);
+    }
+    if (dragging) {
+      doc.tasks.forEach(function (t) {
+        var existing;
+        if (t.deleted) return;
+        existing = triggerLabel(t);
+        if (existing) labels[existing] = true;
+      });
+      labels[''] = true;
+    }
+
+    keys = Object.keys(labels).sort(function (a, b) {
+      if (a === '') return 1;
+      if (b === '') return -1;
+      return a.toLowerCase() < b.toLowerCase() ? -1 :
+        a.toLowerCase() > b.toLowerCase() ? 1 : a < b ? -1 : a > b ? 1 : 0;
+    });
+    keys.forEach(function (key) {
+      var tasks = groups[key] || [];
+      var collapsed = !!ui.collapsedTriggers[key];
+      if (!tasks.length && !dragging) return;
+      html += '<div class="tgroup' + (collapsed ? ' collapsed' : '') +
+        '" data-trigger="' + esc(key) + '">' +
+        '<button type="button" class="tgroup-h">' +
+        '<span class="caret">' + (collapsed ? '▸' : '▾') + '</span>' +
+        '<span class="tlabel">' + esc(key || 'No trigger') + '</span>' +
+        '<span class="tcount">' + tasks.length + '</span></button>' +
+        '<ul>' + tasks.map(taskHtml).join('') +
+        (!tasks.length && dragging ? '<li class="drop-here">Drop here</li>' : '') +
+        '</ul></div>';
+    });
+    return html;
   }
   function render() {
     var list = $('#list');
     if (!list) return;
+    /* Never rebuild the list mid-drag: it would detach the touched node and
+       iOS/Chrome stop bubbling its touch events to document. */
+    if (drag.active && !drag.allowRender) {
+      drag.renderPending = true;
+      return;
+    }
 
     var select = $('#addSec'), previous = select.value;
     select.innerHTML = doc.sections.map(function (s) {
@@ -770,6 +1124,7 @@
     }
 
     var q = ui.query, active = 0, hiddenN = 0;
+    var anyVisible = false;
     var html = doc.sections.map(function (s) {
       var visible = doc.tasks.filter(function (t) {
         if (t.deleted || t.section !== s.id) return false;
@@ -782,43 +1137,68 @@
         if (!q) return true;
         return ('#' + (t.label || t.id) + ' ' + (t.title || '') +
           ' ' + (t.text || '') + ' ' + (t.detail || '') +
-          ' ' + (t.note || '') + ' ' + (t.tags || []).join(' ')).
+          ' ' + (t.note || '') + ' ' + triggerLabel(t) + ' ' +
+          (t.tags || []).join(' ')).
           toLowerCase().indexOf(q) !== -1;
       });
       var open = visible.filter(function (t) { return !t.done; });
       var done = visible.filter(function (t) { return t.done; });
       active += open.length;
+      if (open.length || done.length) anyVisible = true;
       done.sort(function (a, b) {
         return (b.doneAt || b.updatedAt || 0) -
           (a.doneAt || a.updatedAt || 0);
       });
-      if (!open.length && !done.length) return '';
-      return '<section class="sec"><h2>' + esc(s.name) + ' <span>' +
-        open.length + '</span></h2><ul>' + open.map(taskHtml).join('') +
-        '</ul>' + (done.length ?
+      return '<section class="sec" data-sec="' + esc(s.id) + '"><h2>' +
+        esc(s.name) + ' <span>' + open.length + '</span></h2>' +
+        (s.id === 'triggers' ? triggerGroupsHtml(open) :
+          '<ul>' + open.map(taskHtml).join('') +
+          (open.length ? '' : '<li class="drop-here">Drop here</li>') + '</ul>') +
+        (done.length ?
           '<details' + (q ? ' open' : '') + '><summary>Done (' +
           done.length + ')</summary><ul>' +
           done.map(taskHtml).join('') + '</ul></details>' : '') +
         '</section>';
     }).join('');
-    list.innerHTML = html || '<p class="empty">No tasks.</p>';
+    list.innerHTML = html + (anyVisible ? '' : '<p class="empty">No tasks.</p>');
     $('#count').textContent = active + ' open' +
       (hiddenN ? ' · ' + hiddenN + ' hidden' : '');
   }
   function onListChange(e) {
-    if (e.target.type !== 'checkbox') return;
     var li = e.target.closest('li.task');
+    var t, before;
     if (!li) return;
-    var t = byId(li.getAttribute('data-id'));
+    t = byId(li.getAttribute('data-id'));
     if (!t || t.deleted) return;
-    t.done = e.target.checked;
-    if (t.done) t.doneAt = now();
-    else delete t.doneAt;
-    touch(t);
+    if (e.target.type === 'checkbox') {
+      t.done = e.target.checked;
+      if (t.done) t.doneAt = now();
+      else delete t.doneAt;
+      touch(t);
+    } else if (e.target.className &&
+        (' ' + e.target.className + ' ').indexOf(' move-sel ') !== -1) {
+      if (!doc.sections.some(function (s) { return s.id === e.target.value; })) return;
+      before = taskSig(t);
+      t.section = e.target.value;
+      t.sectionManual = true;
+      touch(t, before);
+    }
   }
   function onListClick(e) {
+    var h = e.target.closest && e.target.closest('.tgroup-h');
+    if (h) {
+      var group = h.closest('.tgroup');
+      var label = group ? group.getAttribute('data-trigger') : '';
+      ui.collapsedTriggers[label] = !ui.collapsedTriggers[label];
+      if (!ui.collapsedTriggers[label]) delete ui.collapsedTriggers[label];
+      persistUi();
+      render();
+      return;
+    }
+
     var li = e.target.closest('li.task');
-    if (!li || e.target.type === 'checkbox') return;
+    if (!li || e.target.type === 'checkbox' ||
+        (e.target.closest && e.target.closest('select'))) return;
     var t = byId(li.getAttribute('data-id'));
     if (!t || t.deleted) return;
     var button = e.target.closest('button');
@@ -843,6 +1223,15 @@
         t.note = value;
         touch(t, before);
       }
+    } else if (action === 'trigger') {
+      value = prompt('Trigger', triggerLabel(t));
+      if (value != null) {
+        value = value.trim();
+        if (value) t.trigger = value;
+        else delete t.trigger;
+        t.triggerManual = true;
+        touch(t, before);
+      }
     } else if (action === 'hide') {
       if (isHidden(t)) {
         t.hidden = false;
@@ -864,16 +1253,6 @@
           else delete t.hideUntilDate;
           touch(t, before);
         }
-      }
-    } else if (action === 'move') {
-      value = prompt('Move to section: ' + doc.sections.map(function (s) {
-        return s.id;
-      }).join(', '), t.section);
-      if (value && doc.sections.some(function (s) {
-        return s.id === value.trim();
-      })) {
-        t.section = value.trim();
-        touch(t, before);
       }
     } else if (action === 'del') {
       if (confirm('Delete #' + (t.label || t.id) + '?')) {
@@ -918,6 +1297,11 @@
     sync: sync,
     state: function () {
       return clone({ doc: doc, meta: meta, ui: ui });
+    }
+  };
+  window.__tasksDrag = {
+    active: function () {
+      return !!drag.active;
     }
   };
   if ('serviceWorker' in navigator) {
