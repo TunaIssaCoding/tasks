@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  var CFG_KEY = 'tasks.cfg', DOC_KEY = 'tasks.doc', OLD_META_KEY = 'tasks.meta';
+  var CFG_KEY = 'tasks.cfg', DOC_KEY = 'tasks.doc', OLD_META_KEY = 'tasks.meta', UI_KEY = 'tasks.ui';
   var netFails = 0;
   var FILE = 'tasks.json', NATIVE_MIN = 5000, POLL_MS = 15000;
   var SECTIONS = [
@@ -67,6 +67,41 @@
     d.setUTCHours(0, 0, 0, 0);
     return d.getUTCFullYear() === year &&
       d.getUTCMonth() === month - 1 && d.getUTCDate() === day ? s : null;
+  }
+  function shortTitle(value) {
+    var s = String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+    if (s.length <= 70) return s;
+    var cut = s.slice(0, 70);
+    var space = cut.lastIndexOf(' ');
+    if (space >= 40) cut = cut.slice(0, space);
+    return cut.trim();
+  }
+  function ownerInfo(value) {
+    var raw = String(value || 'you'), match, name;
+    if (raw === 'you') return { kind: 'you', label: 'You', cls: 'you' };
+    match = /^(chase|waiting):(.+)$/.exec(raw);
+    if (match) {
+      name = match[2].trim();
+      if (match[1] === 'chase') {
+        return { kind: 'chase', label: 'Chase ' + name, cls: 'chase' };
+      }
+      return { kind: 'waiting', label: 'Waiting on ' + name, cls: 'waiting' };
+    }
+    return { kind: 'you', label: 'You', cls: 'you' };
+  }
+  function triggerDate(t) {
+    return parseDate(t.hideUntilDate || t.hideUntil || '');
+  }
+  function shortDate(value) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+    var days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    var d = new Date(0);
+    d.setUTCFullYear(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    d.setUTCHours(0, 0, 0, 0);
+    return days[d.getUTCDay()] + ' ' + Number(m[3]) + ' ' +
+      months[Number(m[2]) - 1];
   }
   function b64decode(value) {
     return decodeURIComponent(escape(atob(value.replace(/\s/g, ''))));
@@ -169,12 +204,25 @@
   }
   if (!meta.base) meta.base = emptyDoc();
 
+  var storedUi = load(UI_KEY, {});
   var ui = {
-    query: '', showHidden: false, open: {},
-    status: 'idle', msg: '', setup: false
+    query: String(storedUi.query || '').toLowerCase(),
+    showHidden: !!storedUi.showHidden,
+    ownerFilter: /^(all|you|chase|waiting)$/.test(storedUi.ownerFilter) ?
+      storedUi.ownerFilter : 'all',
+    open: {}, status: 'idle', msg: '', setup: false
   };
   var syncing = false, again = false, pollTimer = 0, debounce = 0;
   var storageError = '';
+  function persistUi() {
+    try {
+      save(UI_KEY, {
+        query: ui.query,
+        showHidden: ui.showHidden,
+        ownerFilter: ui.ownerFilter
+      });
+    } catch (e) {}
+  }
 
   function pending() {
     var base = taskMap(meta.base);
@@ -484,6 +532,10 @@
       section: section,
       room: room,
       text: text,
+      title: shortTitle(text || raw),
+      titleAuto: true,
+      detail: raw,
+      owner: 'you',
       note: '',
       tags: [],
       done: false,
@@ -599,12 +651,21 @@
           localStorage.removeItem(CFG_KEY);
           localStorage.removeItem(DOC_KEY);
           localStorage.removeItem(OLD_META_KEY);
+          localStorage.removeItem(UI_KEY);
           location.reload();
         } catch (e) {
           $('#setupErr').textContent = 'Browser storage failed';
         }
       };
     }
+  }
+  function updateOwnerChips() {
+    var wrap = $('#ownerFilters');
+    if (!wrap) return;
+    Array.prototype.forEach.call(wrap.querySelectorAll('.chip'), function (chip) {
+      chip.className = 'chip' +
+        (chip.getAttribute('data-owner') === ui.ownerFilter ? ' active' : '');
+    });
   }
   function renderShell() {
     $('#app').innerHTML =
@@ -614,12 +675,17 @@
       '<button class="btn small" id="syncNow" title="Sync now">↻</button> ' +
       '<button class="btn small" id="settings" title="Settings">⚙</button>' +
       '</div><form class="add" id="add" autocomplete="off">' +
-      '<input class="input" id="addText" placeholder="New task (Room: text)">' +
+      '<input class="input" id="addText" placeholder="New task">' +
       '<select class="select" id="addSec"></select>' +
       '<button class="btn primary">Add</button></form>' +
       '<div class="tools"><input class="input" id="q" type="search" ' +
       'placeholder="Search"><label><input type="checkbox" id="showHidden">' +
-      ' hidden</label></div></header><main id="list"></main>' +
+      ' hidden</label></div><div class="chips" id="ownerFilters">' +
+      '<button type="button" class="chip" data-owner="all">All</button>' +
+      '<button type="button" class="chip" data-owner="you">You</button>' +
+      '<button type="button" class="chip" data-owner="chase">Chase</button>' +
+      '<button type="button" class="chip" data-owner="waiting">Waiting</button>' +
+      '</div></header><main id="list"></main>' +
       '<div class="toast" id="toast"></div>';
 
     $('#q').value = ui.query;
@@ -631,10 +697,20 @@
     };
     $('#q').oninput = function () {
       ui.query = this.value.toLowerCase();
+      persistUi();
       render();
     };
     $('#showHidden').onchange = function () {
       ui.showHidden = this.checked;
+      persistUi();
+      render();
+    };
+    $('#ownerFilters').onclick = function (e) {
+      var button = e.target.closest('button');
+      if (!button) return;
+      ui.ownerFilter = button.getAttribute('data-owner');
+      persistUi();
+      updateOwnerChips();
       render();
     };
     $('#syncNow').onclick = function () { sync(); };
@@ -647,31 +723,36 @@
     };
     $('#list').addEventListener('click', onListClick);
     $('#list').addEventListener('change', onListChange);
+    updateOwnerChips();
     setStatus(ui.status === 'idle' ? 'busy' : ui.status, ui.msg || 'Loading…');
   }
   function taskHtml(t) {
+    var hidden = isHidden(t);
     var cls = 'task' + (t.done ? ' done' : '') +
-      (isHidden(t) ? ' hid' : '') + (ui.open[t.id] ? ' open' : '');
-    var bits = [];
-    if (isHidden(t)) {
-      bits.push('hidden until ' + (t.hideUntil || t.hideUntilDate || 'a trigger'));
-    }
-    if (t.logged) bits.push('logged ' + t.logged);
+      (hidden ? ' hid' : '') + (ui.open[t.id] ? ' open' : '');
+    var owner = ownerInfo(t.owner);
+    var date = hidden ? triggerDate(t) : null;
+    var title = hidden ? (date ? shortDate(date) : '') :
+      shortTitle(t.title || t.text || '');
+    var detail = hidden ? '' : String(t.detail || '');
+    var note = hidden ? '' : String(t.note || '');
+    var expanded = [detail, note].filter(function (value) {
+      return value;
+    }).join('\n');
     return '<li class="' + cls + '" data-id="' + esc(t.id) + '">' +
       '<input type="checkbox"' + (t.done ? ' checked' : '') +
       ' aria-label="Done #' + esc(t.label || t.id) + '">' +
       '<div class="body"><span class="badge">#' +
       esc(t.label || t.id) + '</span>' +
-      (t.room ? '<span class="room">' + esc(t.room) + ':</span> ' : '') +
-      '<span class="txt">' + esc(t.text) + '</span>' +
-      (bits.length ? '<span class="meta">' +
-        esc(bits.join(' · ')) + '</span>' : '') +
-      '<div class="note">' + esc(t.note || '') + '</div>' +
+      '<span class="owner ' + esc(owner.cls) + '">' +
+      esc(owner.label) + '</span>' +
+      '<span class="txt">' + esc(title) + '</span>' +
+      (expanded ? '<div class="note">' + esc(expanded) + '</div>' : '') +
       '<div class="acts">' +
       '<button class="btn small" data-act="edit">Edit</button>' +
       '<button class="btn small" data-act="note">Note</button>' +
       '<button class="btn small" data-act="hide">' +
-      (isHidden(t) ? 'Unhide' : 'Hide until…') + '</button>' +
+      (hidden ? 'Unhide' : 'Hide until…') + '</button>' +
       '<button class="btn small" data-act="move">Move</button>' +
       '<button class="btn small" data-act="del">Delete</button>' +
       '</div></div></li>';
@@ -692,14 +773,17 @@
     var html = doc.sections.map(function (s) {
       var visible = doc.tasks.filter(function (t) {
         if (t.deleted || t.section !== s.id) return false;
+        if (ui.ownerFilter !== 'all' &&
+            ownerInfo(t.owner).kind !== ui.ownerFilter) return false;
         if (isHidden(t)) {
           hiddenN += 1;
           if (!ui.showHidden) return false;
         }
         if (!q) return true;
-        return ('#' + (t.label || t.id) + ' ' + (t.room || '') +
-          ' ' + (t.text || '') + ' ' + (t.note || '') +
-          ' ' + (t.tags || []).join(' ')).toLowerCase().indexOf(q) !== -1;
+        return ('#' + (t.label || t.id) + ' ' + (t.title || '') +
+          ' ' + (t.text || '') + ' ' + (t.detail || '') +
+          ' ' + (t.note || '') + ' ' + (t.tags || []).join(' ')).
+          toLowerCase().indexOf(q) !== -1;
       });
       var open = visible.filter(function (t) { return !t.done; });
       var done = visible.filter(function (t) { return t.done; });
@@ -739,7 +823,7 @@
     if (!t || t.deleted) return;
     var button = e.target.closest('button');
     var action = button && button.getAttribute('data-act');
-    var value, match;
+    var value;
     var before = taskSig(t);
     if (!action) {
       ui.open[t.id] = !ui.open[t.id];
@@ -747,11 +831,10 @@
       return;
     }
     if (action === 'edit') {
-      value = prompt('Edit task', (t.room ? t.room + ': ' : '') + t.text);
-      if (value != null && value.trim()) {
-        match = /^([^:]{1,60}):\s+(.+)$/.exec(value.trim());
-        t.room = match ? match[1].trim() : '';
-        t.text = match ? match[2].trim() : value.trim();
+      value = prompt('Edit title', shortTitle(t.title || t.text || ''));
+      if (value != null) {
+        t.title = shortTitle(value);
+        t.titleAuto = false;
         touch(t, before);
       }
     } else if (action === 'note') {
