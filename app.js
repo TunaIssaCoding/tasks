@@ -3,6 +3,7 @@
   'use strict';
 
   var CFG_KEY = 'tasks.cfg', DOC_KEY = 'tasks.doc', OLD_META_KEY = 'tasks.meta';
+  var netFails = 0;
   var FILE = 'tasks.json', NATIVE_MIN = 5000, POLL_MS = 15000;
   var SECTIONS = [
     { id: 'today', name: 'Today' },
@@ -277,19 +278,23 @@
       method: method,
       cache: 'no-store',
       credentials: 'omit',
-      headers: {
+      /* Stable URLs + no cache-buster so the browser can reuse the CORS preflight; no-store prevents stale reads. */
+      headers: body ? {
         'Authorization': 'token ' + cfg.token,
         'Accept': 'application/vnd.github+json',
         'Content-Type': 'application/json'
+      } : {
+        'Authorization': 'token ' + cfg.token,
+        'Accept': 'application/vnd.github+json'
       },
       body: body ? JSON.stringify(body) : undefined
     });
   }
   async function getRemote() {
-    var res = await gh('GET', '/contents/' + FILE + '?ref=main&t=' + now());
+    var res = await gh('GET', '/contents/' + FILE + '?ref=main');
     if (res.status === 404) {
       /* A missing file is not evidence that this private repo is accessible. */
-      var repoResponse = await gh('GET', '?t=' + now());
+      var repoResponse = await gh('GET', '');
       if (!repoResponse.ok) throw apiError('GET', repoResponse.status);
       return { doc: emptyDoc(), sha: null };
     }
@@ -383,6 +388,7 @@
       }
       if (!completed) throw new Error('Repeated sync conflicts');
 
+      netFails = 0;
       meta.lastSync = now();
       persist();
       render();
@@ -404,6 +410,8 @@
       } else if (err.status === 404) {
         setStatus('err', 'Repo not found or token lacks access');
       } else {
+        /* Network/CORS blip (GitHub occasionally 405s a preflight): retry soon with backoff. */
+        netFails = Math.min(netFails + 1, 5); schedule(2000 * netFails);
         setStatus('err',
           (navigator.onLine === false ? 'Offline' : 'Sync failed') +
           (meta.dirty ? ' · ' + pending() + ' queued' : ''));
