@@ -1046,9 +1046,10 @@
       esc(t.label || t.id) + '</span>' +
       '<span class="owner ' + esc(owner.cls) + '">' +
       esc(owner.label) + '</span>' +
+      '<span class="main">' +
       (trig && t.section !== 'triggers' ?
         '<span class="trig">' + esc(trig) + '</span>' : '') +
-      '<span class="txt">' + esc(title) + '</span>' +
+      '<span class="txt">' + esc(title) + '</span></span>' +
       (expanded ? '<div class="note">' + esc(expanded) + '</div>' : '') +
       '<div class="acts">' +
       '<button class="btn small" data-act="edit">Edit</button>' +
