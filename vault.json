@@ -1,24 +1,24 @@
 {
   "format": "tasks-board-vault",
   "version": 1,
-  "vault_id": "JpOBqP5DgNsr1N82goVbwA",
-  "updated_at": "2026-11-17T14:56:11.424Z",
+  "vault_id": "V5mrX1lgGfK3cmQXk02pOw",
+  "updated_at": "2026-11-17T15:24:16.226Z",
   "payload": {
     "alg": "AES-256-GCM",
-    "iv": "z_b-c-u6eNSNHawN",
-    "ct": "4l5sFsqgbXJNDWXKxV8LCrQ7BP9P_XDI8kSrgyFsYVS6kfjbd8a-3DXawl9lMv1j1gwCV1QVcAvGjHpHBNPcGJTCDAocR-xYtS4GX1pr6TQq61rG4JxsmpSXOqSCWX-5-K1aBnCg9NQU23WTC9n8mlnSynFbBLwixhcqUb6EF8rCNwI774pySUxpVK6psiBSx8qjxNmpBrjb6SjiYLTkD5u_FZ8HVA1JEeQ_5ojFu4X7lqVOchP-wafV3tP0y32FXTLeR_XRpZhlTG2F8IdQaiNNRtVP3UU6FV_cfLvY6FL7y7jqtIrmVpibjDlVah7Rx9DT"
+    "iv": "AUmun04suK4_Gt-U",
+    "ct": "D8HvuNcGT6Y_bpWZTr_4NrpYG4N3Fsqnq98GZUbVQ8F-Yjj-ZlHgMjM9bArUQbYtpAWI4c_PrXctBotgaCY1rmu2jIQdv00k3_9dMza_jTwvorYpikARfSxYkWWuyP2oJVG5iJb0tOFc0YrFra1xLZPZy85kSuL62WA_XC-C_wua0b7WGJCGZdijmkjrThFTVG5BWqBYQHQBd7MfrqqNYOWiLJ-MHPLbFDFBNIRp_CSVa3ICngdGM7aHsdh6o7hlxODO3Xht3bcOwhZRvLTO_xb3a-jlyUtApvykeOUKDrKGKGWH855XZ9yHREGtw9YL-Rvp"
   },
   "slots": [
     {
-      "id": "L5lw79KXYobqO6L6SYKnUQ",
+      "id": "2mhC85ARzlyH8-UMzid65g",
       "type": "password",
       "kdf": "PBKDF2-SHA256",
       "iterations": 600000,
-      "salt": "xalSp9Mb7tDovKFtQcoiTg",
+      "salt": "ux_8k-6l3ukyDqfWXv6C0A",
       "wrap": {
         "alg": "AES-256-GCM",
-        "iv": "u6Sszbrt-VplFshR",
-        "ct": "iZGheKr4B0pwPhNBTeVlVvz9l6vrgfUL7E1GjSCZmif_rbf2fpEKLOq12SYnH8f-"
+        "iv": "vaRMG9H5ECvXEDHZ",
+        "ct": "NnKlcu6nxSj0RRCusGtr7L9GtOzQ1VHcifBeqk1GaYhF4Y2QEhOloYcASyQWzYUs"
       }
     }
   ]
