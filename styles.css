@@ -64,11 +64,6 @@ li.task.open .acts { display: block; }
 body.dragging .drop-here { display: block; }
 details summary { color: #6b7280; font-size: 12px; cursor: pointer; margin: 4px 2px; }
 .empty { color: #6b7280; font-size: 12px; margin: 2px 4px; }
-.setup { max-width: 460px; margin: 40px auto; padding: 18px; background: #fff; border: 1px solid #d9dee8; border-radius: 12px; }
-.setup h1 { margin-top: 0; font-size: 20px; }
-.setup label { display: block; font-size: 12px; color: #6b7280; margin: 12px 0 4px; }
-.setup .input { width: 100%; }
-.setup p { color: #6b7280; font-size: 13px; }
 .err { color: #dc2626; }
 .toast { position: fixed; left: 50%; bottom: 16px; -webkit-transform: translateX(-50%); transform: translateX(-50%); background: #111827; border: 1px solid #111827; color: #fff; padding: 8px 12px; border-radius: 9px; font-size: 13px; display: none; z-index: 9; }
 .toast.show { display: block; }

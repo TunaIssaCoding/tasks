@@ -4,7 +4,7 @@
 
   var CFG_KEY = 'tasks.cfg', DOC_KEY = 'tasks.doc', OLD_META_KEY = 'tasks.meta', UI_KEY = 'tasks.ui';
   var netFails = 0;
-  var FILE = 'tasks.json', NATIVE_MIN = 5000, POLL_MS = 15000;
+  var NATIVE_MIN = 5000, POLL_MS = 15000;
   var SECTIONS = [
     { id: 'today', name: 'Today' },
     { id: 'followups', name: 'Follow-ups' },
@@ -186,38 +186,51 @@
   }
 
   var cfg = load(CFG_KEY, {});
-  if (!cfg.deviceId) cfg.deviceId = deviceId();
-  if (!cfg.repo) cfg.repo = 'TunaIssaCoding/tasks-data';
-
-  var stored = load(DOC_KEY, null);
-  var doc = emptyDoc();
-  var meta = { sha: null, dirty: false, lastSync: 0, base: emptyDoc() };
-
-  if (stored && stored.doc && stored.repo === cfg.repo) {
-    doc = stored.doc;
-    meta = stored.meta || meta;
-  } else if (stored && stored.schema === 2) {
-    doc = stored;
-    var oldMeta = load(OLD_META_KEY, {});
-    meta.sha = oldMeta.sha || null;
-    meta.lastSync = oldMeta.lastSync || 0;
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) cfg = {};
+  var credentialCleanupFailed = false;
+  if (Object.prototype.hasOwnProperty.call(cfg, 'token')) {
+    delete cfg.token;
+    try { save(CFG_KEY, cfg); } catch (e) {
+      try { localStorage.removeItem(CFG_KEY); } catch (ignored) {
+        credentialCleanupFailed = true;
+      }
+    }
   }
-  if (!meta.base) meta.base = emptyDoc();
-
-  var storedUi = load(UI_KEY, {});
-  var ui = {
-    query: String(storedUi.query || '').toLowerCase(),
-    showHidden: !!storedUi.showHidden,
-    ownerFilter: /^(all|you|chase|waiting)$/.test(storedUi.ownerFilter) ?
-      storedUi.ownerFilter : 'all',
-    collapsedTriggers: storedUi.collapsedTriggers &&
-      typeof storedUi.collapsedTriggers === 'object' ?
-      storedUi.collapsedTriggers : {},
-    open: {}, status: 'idle', msg: '', setup: false
-  };
+  if (!cfg.deviceId) cfg.deviceId = deviceId();
+  var doc = emptyDoc();
+  var meta = freshMeta();
+  var ui = freshUi();
   var syncing = false, again = false, pollTimer = 0, debounce = 0;
   var storageError = '';
+  var active = false, closing = false, generation = 0;
+  var controller = null, syncPromise = null, lockPromise = null;
+  var prepared = null, pendingModule = null, cacheUnavailable = false;
+
+  function freshMeta() {
+    return { sha: null, dirty: false, lastSync: 0, base: emptyDoc() };
+  }
+  function freshUi() {
+    return {
+      query: '', showHidden: false, ownerFilter: 'all',
+      collapsedTriggers: {}, open: {}, status: 'idle', msg: ''
+    };
+  }
+  function cacheModule() {
+    if (!pendingModule) pendingModule = import('./auth/pending.js');
+    return pendingModule;
+  }
+  function scope() {
+    var parts = cfg.repo.split('/');
+    return { owner: parts[0], repo: parts[1], path: cfg.path, branch: cfg.branch };
+  }
+  function isCurrent(epoch) {
+    return active && epoch === generation;
+  }
+  function assertCurrent(epoch) {
+    if (!isCurrent(epoch)) throw new Error('Task session ended');
+  }
   function persistUi() {
+    if (!active || closing) return;
     try {
       save(UI_KEY, {
         query: ui.query,
@@ -238,13 +251,16 @@
     meta.dirty = !sameDoc(doc, meta.base);
   }
   function persist() {
+    if (!active) return false;
     updateDirty();
     try {
       /*
        * Document and acknowledgement baseline are one localStorage write.
        * A crash cannot leave a new edit paired with an old "clean" flag.
        */
-      save(DOC_KEY, { repo: cfg.repo, doc: doc, meta: meta });
+      save(DOC_KEY, {
+        repo: cfg.repo, path: cfg.path, branch: cfg.branch, doc: doc, meta: meta
+      });
       storageError = '';
       return true;
     } catch (e) {
@@ -325,12 +341,14 @@
     e.status = status;
     return e;
   }
-  function gh(method, path, body) {
+  function gh(epoch, method, path, body) {
+    assertCurrent(epoch);
     return fetch('https://api.github.com/repos/' + cfg.repo + path, {
       method: method,
       cache: 'no-store',
       credentials: 'omit',
       redirect: 'error',
+      signal: controller.signal,
       /* Stable URLs + no cache-buster so the browser can reuse the CORS preflight; no-store prevents stale reads. */
       headers: body ? {
         'Authorization': 'token ' + cfg.token,
@@ -343,21 +361,29 @@
       body: body ? JSON.stringify(body) : undefined
     });
   }
-  async function getRemote() {
-    var res = await gh('GET', '/contents/' + FILE + '?ref=main');
+  function contentPath() {
+    return '/contents/' + cfg.path.split('/').map(encodeURIComponent).join('/');
+  }
+  async function getRemote(epoch) {
+    var res = await gh(epoch, 'GET', contentPath() + '?ref=' + encodeURIComponent(cfg.branch));
+    assertCurrent(epoch);
     if (res.status === 404) {
       /* A missing file is not evidence that this private repo is accessible. */
-      var repoResponse = await gh('GET', '');
+      var repoResponse = await gh(epoch, 'GET', '');
+      assertCurrent(epoch);
       if (!repoResponse.ok) throw apiError('GET', repoResponse.status);
       return { doc: emptyDoc(), sha: null };
     }
     if (!res.ok) throw apiError('GET', res.status);
     var entry = await res.json();
+    assertCurrent(epoch);
     var content = entry.content;
     if (!content && entry.size > 0) {
-      var blobResponse = await gh('GET', '/git/blobs/' + entry.sha);
+      var blobResponse = await gh(epoch, 'GET', '/git/blobs/' + entry.sha);
+      assertCurrent(epoch);
       if (!blobResponse.ok) throw apiError('GET blob', blobResponse.status);
       var blob = await blobResponse.json();
+      assertCurrent(epoch);
       content = blob.content;
     }
     return {
@@ -379,18 +405,24 @@
       }
     });
   }
-  async function sync() {
-    if (!cfg.token || ui.setup) return;
+  function sync(flushing) {
+    if (!active || !cfg.token || (closing && flushing !== true)) return Promise.resolve();
     if (syncing) {
       again = true;
-      return;
+      return syncPromise;
     }
     syncing = true;
+    syncPromise = runSync(generation);
+    return syncPromise;
+  }
+  async function runSync(epoch) {
     setStatus('busy', 'Syncing…');
     try {
       var completed = false;
       for (var attempt = 0; attempt < 6; attempt++) {
-        var remote = await getRemote();
+        assertCurrent(epoch);
+        var remote = await getRemote(epoch);
+        assertCurrent(epoch);
 
         /*
          * Read the live document after GET resolves. Edits during GET are
@@ -412,14 +444,16 @@
         published.updatedAt = Math.max(now(), published.updatedAt || 0);
         var body = {
           message: 'app edit [' + cfg.deviceId + ']',
-          branch: 'main',
+          branch: cfg.branch,
           content: b64encode(JSON.stringify(published, null, 1))
         };
         if (remote.sha) body.sha = remote.sha;
-        var response = await gh('PUT', '/contents/' + FILE, body);
+        var response = await gh(epoch, 'PUT', contentPath(), body);
+        assertCurrent(epoch);
 
         if (response.ok) {
           var result = await response.json();
+          assertCurrent(epoch);
           meta.base = published;
           if (!result || !result.content || !result.content.sha) throw apiError('PUT', response.status);
           meta.sha = result.content.sha;
@@ -436,7 +470,9 @@
         if (response.status === 409 || response.status === 422 ||
             response.status >= 500) {
           try { await response.text(); } catch (ignore) { /* drain so old Safari frees the connection */ }
+          assertCurrent(epoch);
           if (attempt < 5) await delay(400 * (attempt + 1));
+          assertCurrent(epoch);
           continue;
         }
         throw apiError('PUT', response.status);
@@ -457,6 +493,7 @@
           new Date(meta.lastSync).toLocaleTimeString());
       }
     } catch (err) {
+      if (!isCurrent(epoch)) return;
       persist();
       if (storageError) {
         setStatus('err', storageError);
@@ -472,20 +509,30 @@
           (meta.dirty ? ' · ' + pending() + ' queued' : ''));
       }
     } finally {
-      syncing = false;
-      if (again) {
-        again = false;
-        schedule(300);
+      if (isCurrent(epoch)) {
+        syncing = false;
+        syncPromise = null;
+        if (again) {
+          again = false;
+          schedule(300);
+        }
       }
     }
   }
   function schedule(ms) {
+    if (!active || closing) return;
     clearTimeout(debounce);
-    debounce = setTimeout(sync, ms == null ? 300 : ms);
+    var epoch = generation;
+    debounce = setTimeout(function () {
+      if (isCurrent(epoch)) sync();
+    }, ms == null ? 300 : ms);
   }
   function poll() {
+    if (!active || closing) return;
     clearTimeout(pollTimer);
+    var epoch = generation;
     pollTimer = setTimeout(function () {
+      if (!isCurrent(epoch) || closing) return;
       if (!document.hidden) sync();
       poll();
     }, POLL_MS);
@@ -507,6 +554,7 @@
     return JSON.stringify(c, Object.keys(c).sort());
   }
   function touch(t, before) {
+    if (!active || closing) return;
     if (before != null && taskSig(t) === before) return;
     t.updatedAt = Math.max(now(), (t.updatedAt || 0) + 1);
     t.deviceId = cfg.deviceId;
@@ -517,6 +565,7 @@
     schedule();
   }
   function addTask(raw, section) {
+    if (!active || closing) return;
     raw = raw.trim();
     if (!raw) return;
     var room = '', text = raw;
@@ -734,6 +783,7 @@
     touch(t, before);
   }
   function beginPress(li, x, y, kind, pointerId) {
+    if (!active || closing) return;
     if (drag.press || drag.active) resetDrag();
     drag.press = true;
     drag.pointerId = pointerId;
@@ -800,9 +850,6 @@
     if (!p) return;
     movePress(p.x, p.y, e);
   }
-  function mouseDown(e) {
-    pointerDown(e);
-  }
   function mouseMove(e) {
     if (!drag.press || drag.kind !== 'mouse') return;
     movePress(e.clientX, e.clientY, e);
@@ -811,22 +858,24 @@
     if (!drag.press || drag.kind !== 'mouse') return;
     finishDrag(false);
   }
+  var dragWired = false;
   function wireDrag() {
     var list = $('#list');
     if (!list) return;
     list.addEventListener('touchstart', touchStart, { passive: true });
+    list.addEventListener(window.PointerEvent ? 'pointerdown' : 'mousedown', pointerDown);
+    if (dragWired) return;
+    dragWired = true;
     document.addEventListener('touchmove', touchMove, { passive: false });
     document.addEventListener('touchend', function () { if (drag.press && drag.kind === 'touch') finishDrag(false); });
     document.addEventListener('touchcancel', function () { if (drag.press && drag.kind === 'touch') finishDrag(true); });
     if (window.PointerEvent) {
-      list.addEventListener('pointerdown', pointerDown);
       document.addEventListener('pointermove', pointerMove);
       document.addEventListener('pointerup', pointerUp);
       document.addEventListener('pointercancel', function (e) {
         if (drag.press && drag.pointerId === e.pointerId) finishDrag(true);
       });
     } else {
-      list.addEventListener('mousedown', mouseDown);
       document.addEventListener('mousemove', mouseMove);
       document.addEventListener('mouseup', mouseUp);
     }
@@ -850,6 +899,7 @@
   /* ---------- rendering ---------- */
 
   function setStatus(kind, message) {
+    if (!active) return;
     ui.status = kind;
     ui.msg = message;
     var el = $('#sync');
@@ -866,90 +916,6 @@
     clearTimeout(toast.timer);
     toast.timer = setTimeout(function () { el.className = 'toast'; }, 3000);
   }
-  function renderSetup(error) {
-    ui.setup = true;
-    $('#app').innerHTML =
-      '<div class="setup"><h1>Connect Tasks</h1>' +
-      '<p>The token is stored in this browser and sent only to api.github.com. ' +
-      'Use a token with Contents read/write access to the private data repo.</p>' +
-      '<label for="tok">GitHub token</label>' +
-      '<input class="input" id="tok" type="password" autocomplete="off" ' +
-      'autocapitalize="off" spellcheck="false">' +
-      '<label for="repo">Data repo (owner/name)</label>' +
-      '<input class="input" id="repo" autocapitalize="off" spellcheck="false" ' +
-      'value="' + esc(cfg.repo) + '">' +
-      '<p class="err" id="setupErr">' + esc(error || '') + '</p>' +
-      '<button class="btn primary" id="connect">Connect</button> ' +
-      (cfg.token ?
-        '<button class="btn" id="cancelSetup">Cancel</button> ' +
-        '<button class="btn" id="forget">Forget token</button>' : '') +
-      '</div>';
-
-    $('#connect').onclick = async function () {
-      var tok = $('#tok').value.trim() || cfg.token;
-      var repo = $('#repo').value.trim();
-      if (!tok) {
-        $('#setupErr').textContent = 'Token required';
-        return;
-      }
-      if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
-        $('#setupErr').textContent = 'Use owner/repo';
-        return;
-      }
-      updateDirty();
-      if (repo !== cfg.repo && meta.dirty) {
-        $('#setupErr').textContent =
-          'Sync queued edits before switching repositories';
-        return;
-      }
-
-      var old = { token: cfg.token, repo: cfg.repo };
-      var button = $('#connect');
-      button.disabled = true;
-      if ($('#cancelSetup')) $('#cancelSetup').disabled = true;
-      if ($('#forget')) $('#forget').disabled = true;
-      $('#setupErr').textContent = 'Checking…';
-      cfg.token = tok;
-      cfg.repo = repo;
-      try {
-        await getRemote();
-        save(CFG_KEY, cfg);
-        if (old.repo !== repo) {
-          doc = emptyDoc();
-          meta = { sha: null, dirty: false, lastSync: 0, base: emptyDoc() };
-        }
-        persist();
-        start();
-      } catch (e) {
-        cfg.token = old.token;
-        cfg.repo = old.repo;
-        $('#setupErr').textContent = e.status ?
-          'GitHub said ' + e.status +
-          (e.status === 404 ? ' (repo not found or token lacks access)' : '') :
-          'Connection or browser storage failed';
-        button.disabled = false;
-        if ($('#cancelSetup')) $('#cancelSetup').disabled = false;
-        if ($('#forget')) $('#forget').disabled = false;
-      }
-    };
-    if ($('#cancelSetup')) $('#cancelSetup').onclick = start;
-    if ($('#forget')) {
-      $('#forget').onclick = function () {
-        updateDirty();
-        if (meta.dirty &&
-            !confirm('Forget this connection and discard queued edits?')) return;
-        try {
-          localStorage.removeItem(CFG_KEY);
-          localStorage.removeItem(DOC_KEY);
-          localStorage.removeItem(OLD_META_KEY);
-          localStorage.removeItem(UI_KEY);
-          location.reload();
-        } catch (e) {
-          $('#setupErr').textContent = 'Browser storage failed';
-        }
-      };
-    }
-  }
   function updateOwnerChips() {
     var wrap = $('#ownerFilters');
     if (!wrap) return;
@@ -959,12 +925,14 @@
     });
   }
   function renderShell() {
+    if (!active) return;
     $('#app').innerHTML =
       '<header class="top"><div class="row1"><h1>Tasks</h1>' +
       '<span class="count" id="count"></span><span class="spacer"></span>' +
       '<span class="sync" id="sync"></span>' +
       '<button class="btn small" id="syncNow" title="Sync now">↻</button> ' +
-      '<button class="btn small" id="settings" title="Settings">⚙</button>' +
+      '<button class="btn small" data-tasks-settings title="Settings">Settings</button> ' +
+      '<button class="btn small" id="lock-button" data-tasks-lock title="Lock Tasks">Lock</button>' +
       '</div><form class="add" id="add" autocomplete="off">' +
       '<input class="input" id="addText" placeholder="New task">' +
       '<select class="select" id="addSec"></select>' +
@@ -983,20 +951,24 @@
     $('#showHidden').checked = ui.showHidden;
     $('#add').onsubmit = function (e) {
       e.preventDefault();
+      if (!active || closing) return;
       addTask($('#addText').value, $('#addSec').value);
       $('#addText').value = '';
     };
     $('#q').oninput = function () {
+      if (!active || closing) return;
       ui.query = this.value.toLowerCase();
       persistUi();
       render();
     };
     $('#showHidden').onchange = function () {
+      if (!active || closing) return;
       ui.showHidden = this.checked;
       persistUi();
       render();
     };
     $('#ownerFilters').onclick = function (e) {
+      if (!active || closing) return;
       var button = e.target.closest('button');
       if (!button) return;
       ui.ownerFilter = button.getAttribute('data-owner');
@@ -1005,13 +977,6 @@
       render();
     };
     $('#syncNow').onclick = function () { sync(); };
-    $('#settings').onclick = function () {
-      if (syncing) {
-        toast('Wait for the current sync before changing the connection');
-        return;
-      }
-      renderSetup('');
-    };
     $('#list').addEventListener('click', onListClick);
     $('#list').addEventListener('change', onListChange);
     wireDrag();
@@ -1133,6 +1098,7 @@
     return html;
   }
   function render() {
+    if (!active) return;
     var list = $('#list');
     if (!list) return;
     /* Never rebuild the list mid-drag: it would detach the touched node and
@@ -1150,7 +1116,7 @@
       select.value = previous;
     }
 
-    var q = ui.query, active = 0, hiddenN = 0;
+    var q = ui.query, openCount = 0, hiddenN = 0;
     var anyVisible = false;
     var html = doc.sections.map(function (s) {
       var visible = doc.tasks.filter(function (t) {
@@ -1170,7 +1136,7 @@
       });
       var open = visible.filter(function (t) { return !t.done; });
       var done = visible.filter(function (t) { return t.done; });
-      active += open.length;
+      openCount += open.length;
       if (open.length || done.length) anyVisible = true;
       done.sort(function (a, b) {
         return (b.doneAt || b.updatedAt || 0) -
@@ -1187,10 +1153,11 @@
         '</section>';
     }).join('');
     list.innerHTML = html + (anyVisible ? '' : '<p class="empty">No tasks.</p>');
-    $('#count').textContent = active + ' open' +
+    $('#count').textContent = openCount + ' open' +
       (hiddenN ? ' · ' + hiddenN + ' hidden' : '');
   }
   function onListChange(e) {
+    if (!active || closing) return;
     var li = e.target.closest('li.task');
     var t, before;
     if (!li) return;
@@ -1211,6 +1178,7 @@
     }
   }
   function onListClick(e) {
+    if (!active || closing) return;
     var h = e.target.closest && e.target.closest('.tgroup-h');
     if (h) {
       var group = h.closest('.tgroup');
@@ -1291,15 +1259,124 @@
     }
   }
 
-  /* ---------- boot ---------- */
+  /* ---------- authenticated lifecycle ---------- */
+
+  function clearPlaintext() {
+    localStorage.removeItem(DOC_KEY);
+    localStorage.removeItem(OLD_META_KEY);
+    localStorage.removeItem(UI_KEY);
+  }
+  function snapshot() {
+    var records = {};
+    records[DOC_KEY] = JSON.stringify({
+      repo: cfg.repo, path: cfg.path, branch: cfg.branch, doc: doc, meta: meta
+    });
+    return records;
+  }
+  function restore(records) {
+    if (!records || !records[DOC_KEY]) return;
+    var stored = JSON.parse(records[DOC_KEY]);
+    if (stored.doc) {
+      doc = validateDoc(stored.doc);
+      meta = stored.meta || freshMeta();
+    } else {
+      doc = validateDoc(stored);
+      var oldMeta = records[OLD_META_KEY] ? JSON.parse(records[OLD_META_KEY]) : {};
+      meta = freshMeta();
+      meta.sha = oldMeta.sha || null;
+      meta.lastSync = oldMeta.lastSync || 0;
+    }
+    meta.base = meta.base ? validateDoc(meta.base) : emptyDoc();
+    updateDirty();
+  }
+  function prepare() {
+    if (prepared) return prepared;
+    prepared = prepareCache().catch(function (error) {
+      prepared = null;
+      throw error;
+    });
+    return prepared;
+  }
+  async function prepareCache() {
+    if (credentialCleanupFailed) {
+      throw new Error('Browser storage prevented removal of the old connection. Unlock is blocked.');
+    }
+    var raw, oldMeta;
+    try {
+      raw = localStorage.getItem(DOC_KEY);
+      oldMeta = localStorage.getItem(OLD_META_KEY);
+      localStorage.removeItem(UI_KEY);
+    } catch (error) {
+      throw new Error('Browser storage is inaccessible. Existing offline edits cannot be protected.');
+    }
+    if (!raw && !oldMeta) return;
+    try {
+      var stored = raw ? JSON.parse(raw) : {};
+      var repository = stored.repo || cfg.repo || 'TunaIssaCoding/tasks-data';
+      var parts = repository.split('/');
+      var location = {
+        owner: parts[0], repo: parts[1],
+        path: stored.path || cfg.path || 'tasks.json',
+        branch: stored.branch || cfg.branch || 'main'
+      };
+      var records = {};
+      if (raw) records[DOC_KEY] = raw;
+      if (oldMeta) records[OLD_META_KEY] = oldMeta;
+      var cache = await cacheModule();
+      await cache.savePending(location, records);
+      clearPlaintext();
+    } catch (error) {
+      throw new Error('Offline edits could not be encrypted. The original cache is preserved; unlock is blocked.');
+    }
+  }
 
   var wired = false;
-  function start() {
-    if (!cfg.token) {
-      renderSetup('');
-      return;
+  async function start(payload) {
+    if (lockPromise) await lockPromise;
+    if (active) throw new Error('Lock the current task session before opening another.');
+    var epoch = ++generation;
+    await prepare();
+    if (epoch !== generation) throw new Error('Task session ended');
+    var location = {
+      owner: payload.owner, repo: payload.repo, path: payload.path, branch: payload.branch
+    };
+    var records = null;
+    cacheUnavailable = false;
+    try {
+      var cache = await cacheModule();
+      records = await cache.loadPending(location);
+    } catch (error) {
+      if (error.code !== 'PENDING_UNAVAILABLE') throw error;
+      cacheUnavailable = true;
     }
-    ui.setup = false;
+    if (epoch !== generation) throw new Error('Task session ended');
+    cfg = {
+      token: payload.token, repo: payload.owner + '/' + payload.repo,
+      path: payload.path, branch: payload.branch, deviceId: cfg.deviceId
+    };
+    doc = emptyDoc();
+    meta = freshMeta();
+    ui = freshUi();
+    try {
+      restore(records);
+    } catch (error) {
+      delete cfg.token;
+      doc = emptyDoc();
+      meta = freshMeta();
+      throw new Error('Offline task edits could not be restored. The encrypted cache is preserved.');
+    }
+    controller = new AbortController();
+    active = true;
+    closing = false;
+    netFails = 0;
+    storageError = '';
+    try {
+      save(CFG_KEY, {
+        repo: cfg.repo, path: cfg.path, branch: cfg.branch, deviceId: cfg.deviceId
+      });
+    } catch (ignored) {}
+    persist();
+    $('#app').inert = false;
     renderShell();
     render();
     sync();
@@ -1307,24 +1384,94 @@
     if (!wired) {
       wired = true;
       document.addEventListener('visibilitychange', function () {
-        if (!document.hidden) sync();
+        if (active && !document.hidden) sync();
       });
       window.addEventListener('online', function () { sync(); });
       window.addEventListener('focus', function () { schedule(100); });
     }
   }
 
-  try {
-    save(CFG_KEY, cfg);
-  } catch (e) {
-    storageError = 'Browser storage failed; connection cannot be saved';
+  function lock() {
+    if (lockPromise) return lockPromise;
+    if (!active) {
+      generation += 1;
+      return Promise.resolve();
+    }
+    lockPromise = finishLock().finally(function () { lockPromise = null; });
+    return lockPromise;
   }
-  persist();
+  async function finishLock() {
+    closing = true;
+    $('#app').inert = true;
+    clearTimeout(pollTimer);
+    clearTimeout(debounce);
+    resetDrag();
+    persist();
+    var timer;
+    try {
+      await Promise.race([
+        sync(true),
+        new Promise(function (resolve) { timer = setTimeout(resolve, 1500); })
+      ]);
+      clearTimeout(timer);
+      // Retire the entire network generation before snapshotting. An ignored
+      // abort or delayed response cannot alter this snapshot or a later session.
+      generation += 1;
+      controller.abort();
+      controller = new AbortController();
+      syncing = false;
+      syncPromise = null;
+      again = false;
+      updateDirty();
+      var cache = await cacheModule();
+      try {
+        if (cacheUnavailable) {
+          var recovered = await cache.loadPending(scope());
+          if (recovered && recovered[DOC_KEY]) {
+            var saved = JSON.parse(recovered[DOC_KEY]);
+            doc = merge(validateDoc(saved.doc || saved), doc);
+            updateDirty();
+            persist();
+          }
+          cacheUnavailable = false;
+        }
+        await cache.savePending(scope(), snapshot());
+      } catch (error) {
+        // A genuinely ephemeral session may lock without a cache only when
+        // GitHub has acknowledged every edit. Never discard dirty memory.
+        if (!cacheUnavailable || meta.dirty || error.code !== 'PENDING_UNAVAILABLE') throw error;
+      }
+      clearPlaintext();
+    } catch (error) {
+      clearTimeout(timer);
+      closing = false;
+      persist();
+      render();
+      $('#app').inert = false;
+      setStatus('err', 'Could not protect offline edits. Tasks remains unlocked; retry after storage is available.');
+      poll();
+      throw new Error('Could not protect offline edits. Tasks remains unlocked.');
+    }
+    active = false;
+    closing = false;
+    controller.abort();
+    controller = null;
+    delete cfg.token;
+    doc = emptyDoc();
+    meta = freshMeta();
+    ui = freshUi();
+    storageError = '';
+    clearTimeout(toast.timer);
+    swallowClick = false;
+    $('#app').innerHTML = '';
+    $('#app').inert = false;
+  }
 
+  window.TasksApp = { prepare: prepare, start: start, lock: lock };
   window.__tasks = {
     sync: sync,
     state: function () {
-      return clone({ doc: doc, meta: meta, ui: ui });
+      return clone({ doc: doc, meta: meta, ui: ui, active: active });
     }
   };
   window.__tasksDrag = {
@@ -1332,10 +1479,4 @@
       return !!drag.active;
     }
   };
-  if ('serviceWorker' in navigator) {
-    window.addEventListener('load', function () {
-      navigator.serviceWorker.register('./sw.js').catch(function () {});
-    });
-  }
-  start();
 })();

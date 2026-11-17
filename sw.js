@@ -1,11 +1,19 @@
 /* Cache only explicitly allowlisted public shell resources. */
-var CACHE = 'tasks-shell-v11';
+var CACHE = 'tasks-shell-v12';
 var PREFIX = 'tasks-shell-';
 var ROOT = new URL('./', self.location.href);
 var SHELL = [
   './index.html',
-  './styles.css?v=11',
-  './app.js?v=11',
+  './styles.css?v=12',
+  './app.js?v=12',
+  './auth/boot.js',
+  './auth/auth.js',
+  './auth/vault.js',
+  './auth/passkey.js',
+  './auth/session.js',
+  './auth/vault-api.js',
+  './auth/pending.js',
+  './auth/lock.css',
   './manifest.webmanifest',
   './icon.svg'
 ];
@@ -56,6 +64,10 @@ self.addEventListener('fetch', function (event) {
   var url = new URL(request.url);
   /* Return before respondWith: no cross-origin/API interception at all. */
   if (url.origin !== ROOT.origin) return;
+  /* Explicit network-only exclusions, including navigations. */
+  var relative = url.pathname.slice(ROOT.pathname.length);
+  if (relative === 'vault.json' || relative.indexOf('tools/') === 0 ||
+      relative.indexOf('tests/') === 0) return;
 
   var key = shellKey(url);
   if (!key) return;
