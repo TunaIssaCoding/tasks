@@ -13,7 +13,7 @@
       ['today', 'Juniper Co', 'Review the cloud lantern sample', 'waiting', 'Priya', 6],
       ['today', 'Studio', 'Pack the cardboard telescope', 'me', '', 2],
       ['next', 'Acme Labs', 'Check the marshmallow bridge draft', 'chase', 'Sam', 12],
-      ['next', 'Northwind', 'Collect tiny orchard sketches', 'waiting', 'Dana', 2],
+      ['next', 'Northwind', 'Collect tiny orchard sketches', 'waiting', 'Dana', 6],
       ['next', 'Juniper Co', 'Share the pretend launch checklist', 'me', '', 2],
       ['next', 'Studio', 'Ask about ribbon samples', 'chase', 'Priya', 6],
       ['event', 'Acme Labs', 'Assemble the comet model', 'me', '', 2, 'Sample arrives'],
@@ -61,5 +61,58 @@
       return t;
     });
     return { schema: 3, tasks: tasks, updatedAt: ts - day };
+  };
+  window.TasksInboxFixtures = function () {
+    var ts = Date.now(), day = 86400000, date = new Date(ts + 4 * day);
+    var scheduled = date.getFullYear() + '-' + ('0' + (date.getMonth() + 1)).slice(-2) +
+      '-' + ('0' + date.getDate()).slice(-2);
+    function proposal(id, type, bot, label, quote, extra, age) {
+      var p = { id: id, type: type, dedupeKey: 'demo:' + id,
+        source: { bot: bot, label: label, quote: quote },
+        createdAt: ts - (age || 1) * 3600000, decision: null };
+      Object.keys(extra).forEach(function (key) { p[key] = extra[key]; });
+      return p;
+    }
+    return { schema: 1, updatedAt: ts, proposals: [
+      proposal('p-demo-call-checklist', 'add', 'Calls bot', 'call notes',
+        'Sam will need the paper kite checklist before the next rehearsal.', {
+          task: { text: 'Send Sam the paper kite checklist', who: { kind: 'me' },
+            when: { kind: 'next' }, room: 'Northwind', tags: ['[call notes]'],
+            note: 'Include the fictional ribbon measurements.', kind: 'task' }
+        }, 1),
+      proposal('p-demo-import-lantern', 'add', 'open.md importer', 'new line in open.md',
+        'Ask Priya for the Juniper Co lantern colour samples.', {
+          task: { text: 'Ask Priya for lantern colour samples', who: { kind: 'chase', name: 'Priya' },
+            when: { kind: 'later' }, room: 'Juniper Co' }
+        }, 2),
+      proposal('p-demo-import-date', 'change', 'open.md importer', 'line #5006 changed',
+        'Share the pretend launch checklist on the rehearsal date.', {
+          taskId: 5006, changes: { when: { from: { kind: 'next' },
+            to: { kind: 'date', date: scheduled } } }
+        }, 3),
+      proposal('p-demo-waiting-dana', 'change', 'Work Driver', 'waiting 6 days',
+        'Dana has not sent the tiny orchard sketches yet.', {
+          taskId: 5005, changes: {
+            who: { from: { kind: 'waiting', name: 'Dana' }, to: { kind: 'chase', name: 'Dana' } },
+            when: { from: { kind: 'next' }, to: { kind: 'today' } },
+            text: { from: 'Collect tiny orchard sketches', to: 'Chase Dana about tiny orchard sketches' }
+          }
+        }, 4),
+      proposal('p-demo-close-city', 'close', 'open.md importer', 'line #5012 was removed', '', {
+        taskId: 5012
+      }, 5),
+      proposal('p-demo-moon-garden', 'add', 'Work Driver', 'call notes',
+        'Sketch three paper paths around the imaginary blue fern beds.', {
+          task: { text: 'Sketch the moon garden', who: { kind: 'me' },
+            when: { kind: 'today' }, room: 'Acme Labs' },
+          decision: { result: 'accepted', at: ts - day, taskId: 5000 }
+        }, 48),
+      proposal('p-demo-dismissed-poster', 'add', 'Calls bot', 'call notes',
+        'Perhaps Studio could make another pretend poster.', {
+          task: { text: 'Make another pretend poster', who: { kind: 'me' },
+            when: { kind: 'later' }, room: 'Studio' },
+          decision: { result: 'dismissed', at: ts - day }
+        }, 30)
+    ] };
   };
 })();

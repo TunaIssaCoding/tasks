@@ -1,71 +1,78 @@
-- Phase: Boards v2 / Tasks 2.1. Implemented in place; no commit, push, install, live-data request, or data migration. Browser verification fulfilled page requests from local files and blocked other requests. No secret files were read.
-- Data changes:
-  - Added non-mutating who/when/kind/whoSince views with the reference CLI's owner/self-owner, section, hidden-date, hidden-event, unnamed-trigger, and unknown-section mappings. Explicit who/when/kind take precedence.
-  - Schema 2 writes retain legacy fields. Who writes use who_to_owner semantics; When writes match apply_when_schema2, including the special triggers-section behavior. Make it a task writes longterm. No schema-3 task fields are added, and a document without a schema property stays that way.
-  - Schema 3 writes use who/when/kind/whoSince and omit legacy fields and top-level sections. whoSince changes only when who changes. New tasks use Me / Today in either schema, with native IDs >= 5000 and the existing Room: prefix.
-  - Preserved unknown document/task JSON values and sections; edited task and document timestamps advance as before. Fixed nested-field no-op comparison so who/when changes participate correctly in stamping.
-  - Kept task LWW comparison on (updatedAt, deviceId), remote wins on exact ties, and native creation-ID remapping. Tombstones remain in storage/merge but not views or suggestions.
-  - Clean sessions adopt remotely migrated documents without a write. As in the CLI, pending edits cannot be merged across schema versions: they remain preserved, and sync reports a schema conflict rather than silently migrating or discarding them. Migration should follow flushing/reconciling pending edits.
+- Phase: Boards v2 / Tasks 3.1 — Inbox. Implemented in place. No commit, push, install, live-data request, or data migration. No secret files read. All repository edits are inside this snapshot.
 - UI changes:
-  - Tasks / Ideas / Done this week tabs; document title remains Tasks. Header has open count, relative sync, search, menu, Lock, always-visible add, Everyone / My move / Chasing / Waiting filters, and rooms from the data. Removed section picker and hidden checkbox.
-  - Tasks group into Today, Next, After an event, Later, and On a date. Arrived dates show a from tag without rewriting data. Future dates retain titles, sort by date, and start collapsed. Event subgroups collapse independently. Date/event collapse state survives reload and Lock through the protected offline cache. Empty groups disappear under filters.
-  - Rows retain muted rooms, copyable grey monospace IDs, and detail only when different from title. Chasing/waiting pills show age, amber from five days and red from ten; no Me pill. Schema 2 pill age uses updatedAt.
-  - Full autosaving editor: segmented who/when, native date input, name/event/room datalists, title, note, available provenance, separate red Delete with six-second Undo. Narrow screens <= 640px use a bottom sheet. Escape closes; saved changes remain saved.
-  - Ideas convert to tasks in Later. Done this week uses a local-time Monday boundary, newest day first, and unticking restores a task.
-  - Dragging onto When/event destinations changes when. Generic date/event headers open the editor to obtain the missing date/name instead of inventing one. No DOM rebuild during active drag; editor remains the touch-friendly alternative.
-  - Preserved j/k/Enter, /, ?, Escape and input/lock shortcut suppression; no native dialogs or custom context menu. app.js retains var/function syntax. CSP and auth modules are unchanged.
-  - Found and fixed unchanged imported long-title truncation on closing the editor; regression preserves the complete imported title.
+  - Added Inbox (n) before Tasks / Ideas / Done this week; Tasks remains the default. The title is `(n) Tasks`, or `Tasks` at zero. Counts include undecided supported proposals, including missing targets that can still be dismissed; unknown future proposal types are not actionable.
+  - Added dashed bot cards with a square mark, source.bot, relative creation time, source.label, italic quoted text with a left rule, and the suggestion. The supplied `no quote` label remains unchanged. All bot text is escaped.
+  - Add cards offer Accept to the suggested When, Today / Next / Later, Edit and Dismiss. The draft editor uses segmented who/when controls, name/date/event inputs, room and text; edits do not alter proposals. Accept records edited when the accepted fields differ. Opening and accepting unchanged stays accepted; Cancel/Escape discards the draft.
+  - Change cards show per-field from/to differences, Apply change and Keep mine. Close cards show the target title, Close it and Keep open. Missing/deleted targets show the missing task ID and Dismiss only.
+  - Added Inbox j/k/a/e/d keys and Help text. Inputs, editors, contenteditable fields and lock screens suppress shortcuts.
+  - Task-editor provenance resolves acceptedFrom to the Inbox source bot, creation date and label when available, retaining the proposal reference and existing fallback metadata.
+- Data and decisions:
+  - Fetches inbox.json from the configured task file's sibling directory, same owner/repo/branch. Missing/404 means the specified empty state, no Inbox PUT and no file creation.
+  - Stores Inbox, its merge baseline and pending Undo bookkeeping inside the existing tasks.doc cache record. The existing pending-cache encryption protects both documents on Lock; Lock clears plaintext storage, in-memory proposals, task UI and the title count. Demo stays in its own namespace.
+  - Acceptance reuses the normal native task creation path and IDs >= 5000. Copies text/who/when/room and optional title/note/tags/kind, sets source=inbox and acceptedFrom, and sets schema-3 whoSince. Schema 2 uses legacy mapped fields without migrating or adding who/when/kind/whoSince.
+  - Changes use the existing task mutation path, including whoSince only on an actual who change. Schema-3 kind-only proposals do not implicitly change When. Close sets done and doneAt. Dismiss/Keep mine/Keep open only change the proposal decision and do not write tasks.json.
+  - Every decision has six-second Undo: remove a newly accepted task, restore changed fields/completion, or reverse dismissal, and clear the matching decision together. Works before and after publication and after native-ID remapping.
+- Sync safety:
+  - Tasks publish before Inbox decisions. Both use SHA-aware GET/PUT retries; pending task changes prevent premature publication of their decisions.
+  - Inbox three-way merge uses the last-synced base, preserves remotely appended proposals and remote non-decision content, respects remote pruning, and keeps remote decisions when both writers decided. Only decision is modified on proposal objects; document updatedAt advances on publication.
+  - Self-heals undecided proposals from existing acceptedFrom tasks, including partial task-success/Inbox-failure recovery. Concurrent acceptance adopts the existing remote accepted task instead of creating a second one; decision IDs follow native task-ID remapping.
+  - Undo may clear only its matching earlier decision. A later conflicting remote decision remains authoritative.
+  - Reproduced and fixed Undo followed immediately by edited re-accept losing the revised text during sync. Re-accept now reuses the original creation where necessary; Undo followed by Dismiss also preserves the task removal. Permanent regression coverage and an offline command smoke confirm the corrected result.
 - Demo and shell:
-  - Replaced fixtures with 25 fictional schema 3 tasks: all requested groups, two named events, past/future dates, 2/6/12-day chasing/waiting ages, two ideas, four completions spread across available days this week, Work Driver provenance, and differentiated detail.
-  - Demo storage uses tasks-demo:v2:. Existing no-network, no-vault, no-real-storage isolation remains.
-  - Worker cache is tasks-shell-v14; versioned page assets use ?v=14. Every page script/link asset is precached.
+  - Added seven fictional Inbox fixtures: Calls bot add with quote/note/[call notes] tag; open.md importer add; importer Next-to-date change; Work Driver waiting-six-days Dana-to-chase/Today change; importer close; two decided proposals hidden from Inbox.
+  - Uses the existing invented Acme Labs / Northwind / Juniper Co / Studio and Dana / Priya / Sam setting. Reset demo and its Undo handle both documents.
+  - Demo storage bumped to tasks-demo:v3:. Demo still makes no data requests, opens no vault/IndexedDB, registers no worker and touches no real-board storage.
+  - Worker cache is tasks-shell-v15; page assets use ?v=15; all page assets remain precached.
+  - app.js retains var/function syntax, with existing async functions. CSP and auth modules are unchanged. No native prompt/confirm/alert or custom context menu was added.
 - Files touched:
   - app.js
-  - styles.css
-  - index.html
   - demo-fixtures.js
+  - index.html
+  - styles.css
   - sw.js
-  - tests/dom-harness.mjs (new)
-  - tests/phase21.test.mjs (new)
+  - tests/dom-harness.mjs
+  - tests/app.test.mjs
   - tests/phase1.test.mjs
+  - tests/phase31.test.mjs (new)
   - README.md
-  - REPORT.md
-- Intentional phase-1 test updates:
-  - Extracted the existing VM DOM harness for reuse and adapted its action/edit helpers to the full autosaving editor.
-  - Demo fixture assertions now require schema 3 instead of schema 2, and use the full fictional-name denylist.
-  - Replaced the obsolete hide-editor/cancel contract with date-editor validity, unchanged input/no-op behavior, and dismissal coverage. Escape no longer rolls back changes already autosaved.
-  - Retained schema-2 round-trip, deletion Undo, auth/lock, demo isolation, shortcut suppression, native-dialog prohibition, and precache coverage. Existing app, CLI/vault, and worker test files were not changed.
+  - REPORT.md (replaced)
+- Existing-test adaptations:
+  - DOM harness now models independent task/Inbox files, Inbox SHA conflicts/failures, request ordering and bounded retry-timer advancement.
+  - Existing app-test network mocks return Inbox 404 without disturbing their task transport scenarios.
+  - Existing demo namespace assertions use v3. Existing schema-2/schema-3, auth/vault, offline-cache and worker tests continue to pass.
 - Test command: `node --test --test-timeout=15000 tests/*.test.mjs`
-- Final test output, pasted:
+- Final output, pasted:
   ```text
-  ℹ tests 60
+  ℹ tests 87
   ℹ suites 0
-  ℹ pass 60
+  ℹ pass 87
   ℹ fail 0
   ℹ cancelled 0
   ℹ skipped 0
   ℹ todo 0
-  ℹ duration_ms 1599.067342
+  ℹ duration_ms 1566.178716
   ```
-- New phase-2.1 coverage includes every requested mapping/write table, schema-2 UI writes and preservation, schema-3 round-trip and whoSince rules, new tasks in either schema, grouping/date/event placement, pills and thresholds, owner/room filters, Done restoration, drag destinations, schema-3 LWW/tombstones/collision remapping, provenance/demo scenarios, schema-less legacy editing, clean migration adoption/pending conflict preservation, and collapse restoration after Lock. Shared phase-1 tests enforce native-dialog/context-menu absence, demo isolation/fictional IDs, and all page assets in precache.
-- Real Chromium smoke, using local files with request interception and no live API:
-  - Observed desktop groups, room prefixes, distinct detail, normal/amber/red pills, collapsed future dates, and provenance.
-  - Changed note, who, and when through the real editor and observed saved schema-3 values. Exercised owner and room filters, Ideas conversion, Done grouping/untick, Room-prefixed add, search, and Delete/Undo.
-  - Dragged a real row into Next with mouse events; observed drag active with the original row still attached, then when: next afterward.
-  - Captured the 390x844 surface: editor position fixed, bottom aligned, with all controls and Delete visible in the bottom sheet. The browser tool reset viewport settings between calls; the mobile check set the viewport and captured the surface in one call.
-  - Loaded a synthetic schema-2 document in isolated demo storage. Opening/closing its long title preserved it exactly. Note/who/when editing produced owner: waiting:Dana, section: followups, sectionManual: true, hidden: false, while preserving sections and custom values and adding no schema-3 fields.
-  - Exercised j/Enter/Escape editor navigation. Observed only tasks-demo:v2: application storage keys. Browser application errors were absent; blocked browser-extension injection requests were the only recorded request errors.
+- Phase-3.1 regression coverage:
+  - Accept/edit/dismiss, proposal-field immutability, exactly-one-task acceptance, native IDs, tags/note copying, changed vs unchanged drafts, and task-before-Inbox publication order.
+  - Change diffs including text/kind/note, whoSince invariants, Keep mine, close/Keep open, missing/deleted targets, and Undo for all decision types.
+  - 404 empty state/no creation, exact title/count behavior, remote append/prune/decision precedence, SHA conflict retry, self-heal and partial publication recovery, concurrent acceptance deduplication, ID-remap Undo and rapid reconsideration.
+  - Keyboard/input suppression, schema-2 legacy writes, fictional demo fixtures/decided hiding/isolation/reset, Lock clearing/restoring queued decisions and baselines, and nested task paths with non-default repository/branch.
+- Runtime smoke, real local Chromium with page assets fulfilled from local files and other requests blocked:
+  - Observed five Inbox cards, two hidden decided fixtures, bot attribution/quotes, diffs, suggested acceptance labels, tab count and title.
+  - Accepted the Calls bot suggestion: exactly one task appeared with acceptedFrom, note and [call notes]. Undo removed it and restored Inbox (5). Edited text, who, when and room before accepting; observed result=edited and the expected task fields.
+  - Opened the accepted task editor and observed `Proposed by Calls bot · Tue, Nov 24 · call notes · Reference: p-demo-call-checklist`.
+  - Applied the Work Driver change and observed chase:Dana, When Today and updated whoSince; exercised Undo. Closed the target task and observed done/doneAt plus its accepted decision; exercised Undo. Dismissed an importer change and observed the count decrease.
+  - Captured the desktop cards and the 390x844 editor surface. The mobile editor was fixed to the bottom, with segmented controls and editable fields visible; no horizontal content overflow was observed.
+  - Exercised j/e, typing suppression, Escape and d on the refreshed app. Observed only tasks-demo:v3: application storage keys.
+  - No application exception was reported. Browser tooling produced blocked extension-injection requests and unexpected blocked localhost navigation; reloaded the locally intercepted page and continued verification. Browser tab was closed afterward.
+  - Offline publication smoke before the rapid-reaccept fix returned the old text and accepted result; after the fix it returned one task with `Revised paper moon` and result=edited.
 - Brief “Tests to add” status:
-  - Schema 2 renders and saves unchanged apart from edits: covered now in phase1 and phase21 tests.
-  - Schema 3 round trip and whoSince only on who changes: covered now in phase21 tests.
-  - Inbox accept/edit/dismiss decision writes and exactly-one-task acceptance: deferred to Tasks phase 3.1.
-  - Reading old-status migration, including manual Commented: deferred to Reading phase 2.1, outside this Tasks repository.
-  - Reading 90% auto-finish and Undo restoring reading: deferred to Reading phase 2.1.
-  - Reading Arrivals/pile split: deferred to Reading phase 3.1.
-  - Reading Up next cap of ten: deferred to Reading phase 3.1.
-  - Stale Reading bot box when notes are newer: deferred to the Reading bot-box implementation (G2/phase 4 in the Grokbot handoff; frontend release table lists it under 2.1). Outside this Tasks scope; handoffs disagree on that Reading release number.
-  - No prompt/confirm/alert calls: covered now for app.js and every auth/*.js file.
-- Limits and intentional exclusions:
-  - No Inbox tab/cards, inbox.json reads, Listen, or data migration, as requested. No requested Tasks phase-2.1 feature was otherwise intentionally omitted.
-  - acceptedFrom is a proposal-ID string in the data contract, not source metadata. Provenance shows source/date/tags available on the task plus its reference; absent metadata is not fabricated or fetched from Inbox. The demo supplies Work Driver and call notes.
-  - Physical old-iPad Safari, touch hardware, and live GitHub migration/deployment were not available or permitted. Chromium desktop/mobile layout and pointer smoke plus isolated tests do not substitute for those device/deployment checks.
+  - Schema 2 rendering/write-back without migration: covered by existing phase1/phase21 tests and new Inbox schema-2 coverage.
+  - Schema 3 round-trip and whoSince only on who changes: covered by phase21 and Inbox change tests.
+  - Inbox accept/edit/dismiss decision-only proposal writes and exactly-one-task acceptance: covered now in phase31.
+  - Native prompt/confirm/alert prohibition: existing app/auth coverage still passes.
+  - Reading old-status migration including manual Commented, 90% auto-finish/Undo, Arrivals/pile split, Up next cap of ten, and stale bot-box detection: deferred to the separate Reading application; outside this Tasks phase.
+- Skipped and limits:
+  - No requested Tasks phase-3.1 feature intentionally skipped. No Reading, Listen, bot proposal generation, data migration or G6 scheduling/settings UI; the requested Work Driver change card is rendered normally.
+  - No live GitHub calls, deployment, commit or push, per instructions. GitHub behavior was exercised with isolated mocks, not a real repository.
+  - Physical old-iPad Safari and touch hardware were unavailable. ES5-style app code and Chromium desktop/mobile checks do not substitute for physical-device verification.
