@@ -3,7 +3,7 @@
   'use strict';
 
   var demo = !!(window.location && window.location.hash === '#demo');
-  var storagePrefix = demo ? 'tasks-demo:' : '';
+  var storagePrefix = demo ? 'tasks-demo:v2:' : '';
   var CFG_KEY = 'tasks.cfg', DOC_KEY = 'tasks.doc', OLD_META_KEY = 'tasks.meta', UI_KEY = 'tasks.ui';
   CFG_KEY = storagePrefix + CFG_KEY;
   DOC_KEY = storagePrefix + DOC_KEY;
@@ -82,32 +82,68 @@
     if (space >= 40) cut = cut.slice(0, space);
     return cut.trim();
   }
-  function ownerInfo(value) {
-    var raw = String(value || 'you'), match, name;
-    if (raw === 'you') return { kind: 'you', label: 'You', cls: 'you' };
-    match = /^(chase|waiting):(.+)$/.exec(raw);
-    if (match) {
-      name = match[2].trim();
-      if (match[1] === 'chase') {
-        return { kind: 'chase', label: 'Chase ' + name, cls: 'chase' };
-      }
-      return { kind: 'waiting', label: 'Waiting on ' + name, cls: 'waiting' };
+  function taskWho(t) {
+    if (t.who && typeof t.who === 'object' && t.who.kind) return t.who;
+    var match = /^(chase|waiting):(.+)$/.exec(String(t.owner || '').trim());
+    if (!match) return { kind: 'me' };
+    var name = match[2].trim();
+    if (!name || (match[1] === 'chase' && /^(you|tuna|patrick|me)$/i.test(name))) return { kind: 'me' };
+    return { kind: match[1], name: name };
+  }
+  function taskWhen(t) {
+    if (t.when && typeof t.when === 'object' && t.when.kind) return t.when;
+    if (t.hidden) {
+      if (t.hideUntilDate) return { kind: 'date', date: t.hideUntilDate };
+      return { kind: 'event', event: t.hideUntil || 'Trigger not named' };
     }
-    return { kind: 'you', label: 'You', cls: 'you' };
+    if (t.section === 'today') return { kind: 'today' };
+    if (t.section === 'triggers') return { kind: 'event', event: t.trigger || 'Trigger not named' };
+    if (t.section === 'longterm' || t.section === 'ideas') return { kind: 'later' };
+    return { kind: 'next' };
   }
-  function triggerDate(t) {
-    return parseDate(t.hideUntilDate || t.hideUntil || '');
+  function taskKind(t) {
+    return t.kind === 'task' || t.kind === 'idea' ? t.kind : t.section === 'ideas' ? 'idea' : 'task';
   }
-  function shortDate(value) {
-    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
-    var days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    var d = new Date(0);
-    d.setUTCFullYear(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-    d.setUTCHours(0, 0, 0, 0);
-    return days[d.getUTCDay()] + ' ' + Number(m[3]) + ' ' +
-      months[Number(m[2]) - 1];
+  function taskView(t) {
+    var view = {};
+    Object.keys(t).forEach(function (key) { view[key] = t[key]; });
+    view.who = taskWho(t);
+    view.when = taskWhen(t);
+    view.kind = taskKind(t);
+    view.whoSince = doc.schema === 3 ? (t.whoSince || 0) : (t.updatedAt || 0);
+    return view;
+  }
+  function whoToOwner(who) {
+    var name = String(who.name || '').trim();
+    return (who.kind === 'chase' || who.kind === 'waiting') && name ? who.kind + ':' + name : 'you';
+  }
+  /* Keep the CLI's schema-2 write semantics, including its trigger-section case. */
+  function applyWhenSchema2(t, when) {
+    var kind = when.kind;
+    if (kind === 'today' || kind === 'next' || kind === 'later') {
+      if (kind !== 'later' || t.section !== 'ideas') {
+        t.section = kind === 'today' ? 'today' : kind === 'next' ? 'followups' : 'longterm';
+        t.sectionManual = true;
+      }
+      t.hidden = false;
+      delete t.hideUntil;
+      delete t.hideUntilDate;
+    } else if (kind === 'date') {
+      t.hidden = true;
+      t.hideUntil = when.date;
+      t.hideUntilDate = when.date;
+    } else if (kind === 'event') {
+      var event = when.event || 'Trigger not named';
+      if (t.section === 'triggers') {
+        if (event !== 'Trigger not named') t.trigger = event;
+        else delete t.trigger;
+        t.triggerManual = true;
+      } else {
+        t.hidden = true;
+        t.hideUntil = event;
+        delete t.hideUntilDate;
+      }
+    }
   }
   function b64decode(value) {
     return decodeURIComponent(escape(atob(value.replace(/\s/g, ''))));
@@ -130,8 +166,8 @@
     return { schema: 2, sections: clone(SECTIONS), tasks: [], updatedAt: 0 };
   }
   function validateDoc(value) {
-    if (!value || value.schema !== 2 ||
-        !Array.isArray(value.sections) || !Array.isArray(value.tasks)) {
+    if (!value || (value.schema !== undefined && value.schema !== 2 && value.schema !== 3) ||
+        (value.schema !== 3 && !Array.isArray(value.sections)) || !Array.isArray(value.tasks)) {
       throw new Error('Invalid tasks.json schema');
     }
     var ids = Object.create(null);
@@ -170,14 +206,16 @@
     return JSON.stringify(canonical(publicTask(task)));
   }
   function clean(value) {
-    return {
-      schema: 2,
-      sections: clone(value.sections),
-      tasks: value.tasks.map(publicTask).sort(function (a, b) {
-        return a.id - b.id;
-      }),
-      updatedAt: value.updatedAt || 0
-    };
+    var result = clone(value);
+    result.tasks = value.tasks.map(publicTask);
+    if (value.schema === 3) {
+      delete result.sections;
+      result.tasks.forEach(function (t) {
+        ['section', 'sectionManual', 'owner', 'trigger', 'triggerManual',
+          'hidden', 'hideUntil', 'hideUntilDate'].forEach(function (key) { delete t[key]; });
+      });
+    }
+    return result;
   }
   function sameDoc(a, b) {
     var left = clean(a), right = clean(b);
@@ -218,7 +256,7 @@
   }
   function freshUi() {
     return {
-      query: '', showHidden: false, ownerFilter: 'all',
+      query: '', ownerFilter: 'all', roomFilter: '', tab: 'tasks', datesCollapsed: true,
       collapsedTriggers: {}, open: {}, status: 'idle', msg: ''
     };
   }
@@ -241,11 +279,17 @@
     try {
       save(UI_KEY, {
         query: ui.query,
-        showHidden: ui.showHidden,
+        roomFilter: ui.roomFilter,
+        tab: ui.tab,
+        datesCollapsed: ui.datesCollapsed,
         ownerFilter: ui.ownerFilter,
         collapsedTriggers: ui.collapsedTriggers
       });
     } catch (e) {}
+    persist();
+  }
+  function collapseState() {
+    return { datesCollapsed: ui.datesCollapsed, collapsedTriggers: ui.collapsedTriggers };
   }
 
   function pending() {
@@ -266,7 +310,7 @@
        * A crash cannot leave a new edit paired with an old "clean" flag.
        */
       save(DOC_KEY, {
-        repo: cfg.repo, path: cfg.path, branch: cfg.branch, doc: doc, meta: meta
+        repo: cfg.repo, path: cfg.path, branch: cfg.branch, doc: doc, meta: meta, view: collapseState()
       });
       storageError = '';
       return true;
@@ -298,6 +342,11 @@
     return true;
   }
   function merge(local, remote) {
+    if ((local.schema === 3) !== (remote.schema === 3)) {
+      var error = new Error('Task schema changed; pending edits are preserved. Reconcile them before syncing the migrated board.');
+      error.code = 'SCHEMA_CHANGED';
+      throw error;
+    }
     var remoteMap = taskMap(remote), map = Object.create(null);
     var next = NATIVE_MIN - 1;
     var localTasks = local.tasks.map(clone);
@@ -323,22 +372,25 @@
       if (!current || !wins(current, r)) map[r.id] = clone(r);
     });
 
-    var sections = clone(remote.sections);
-    var sectionIds = Object.create(null);
-    sections.forEach(function (s) { sectionIds[s.id] = true; });
-    local.sections.forEach(function (s) {
-      if (!sectionIds[s.id]) {
-        sections.push(clone(s));
-        sectionIds[s.id] = true;
-      }
-    });
-    return {
-      schema: 2,
-      sections: sections,
-      tasks: Object.keys(map).map(function (id) { return map[id]; })
-        .sort(function (a, b) { return a.id - b.id; }),
-      updatedAt: Math.max(local.updatedAt || 0, remote.updatedAt || 0)
-    };
+    var result = clone(remote);
+    if (remote.schema === 3) {
+      delete result.sections;
+    } else {
+      var sections = clone(remote.sections);
+      var sectionIds = Object.create(null);
+      sections.forEach(function (s) { sectionIds[s.id] = true; });
+      local.sections.forEach(function (s) {
+        if (!sectionIds[s.id]) {
+          sections.push(clone(s));
+          sectionIds[s.id] = true;
+        }
+      });
+      result.sections = sections;
+    }
+    result.tasks = Object.keys(map).map(function (id) { return map[id]; })
+      .sort(function (a, b) { return a.id - b.id; });
+    result.updatedAt = Math.max(local.updatedAt || 0, remote.updatedAt || 0);
+    return result;
   }
 
   /* ---------- GitHub contents API ---------- */
@@ -439,7 +491,7 @@
          * Read the live document after GET resolves. Edits during GET are
          * included; merge never mutates either input.
          */
-        doc = merge(doc, remote.doc);
+        doc = meta.dirty ? merge(doc, remote.doc) : clone(remote.doc);
         meta.base = clean(remote.doc);
         meta.sha = remote.sha;
         persist();
@@ -507,6 +559,8 @@
       persist();
       if (storageError) {
         setStatus('err', storageError);
+      } else if (err.code === 'SCHEMA_CHANGED') {
+        setStatus('err', err.message);
       } else if (err.status === 401 || err.status === 403) {
         setStatus('err', 'Token rejected (' + err.status + ')');
       } else if (err.status === 404) {
@@ -561,7 +615,7 @@
   function taskSig(t) {
     var c = {}, k;
     for (k in t) if (k !== 'updatedAt' && k !== 'deviceId' && k.charAt(0) !== '_') c[k] = t[k];
-    return JSON.stringify(c, Object.keys(c).sort());
+    return JSON.stringify(canonical(c));
   }
   function touch(t, before) {
     if (!active || closing) return;
@@ -574,7 +628,7 @@
     if (syncing) again = true;
     schedule();
   }
-  function addTask(raw, section) {
+  function addTask(raw) {
     if (!active || closing) return;
     raw = raw.trim();
     if (!raw) return;
@@ -592,17 +646,14 @@
     var task = {
       id: max + 1,
       label: String(max + 1),
-      section: section,
       room: room,
       text: text,
       title: shortTitle(text || raw),
       titleAuto: true,
       detail: raw,
-      owner: 'you',
       note: '',
       tags: [],
       done: false,
-      hidden: false,
       deleted: false,
       source: 'app',
       createdAt: ts,
@@ -611,15 +662,67 @@
       _new: true,
       _creator: cfg.deviceId
     };
+    if (doc.schema === 3) {
+      task.who = { kind: 'me' };
+      task.when = { kind: 'today' };
+      task.kind = 'task';
+      task.whoSince = ts;
+    } else {
+      task.section = 'today';
+      task.owner = whoToOwner({ kind: 'me' });
+      task.hidden = false;
+    }
     doc.tasks.push(task);
     touch(task);
   }
-  function isHidden(t) {
-    return !!t.hidden &&
-      (!t.hideUntilDate || t.hideUntilDate > todayIso());
-  }
-  function triggerLabel(t) {
-    return String(t.trigger || '').trim();
+  function changeTask(t, field, value) {
+    if (!active || closing || !t || t.deleted) return false;
+    var before = taskSig(t), schema3 = doc.schema === 3;
+    if (field === 'who') {
+      if (!value || !/^(me|chase|waiting)$/.test(value.kind)) return false;
+      var who = { kind: value.kind };
+      if (who.kind !== 'me') {
+        who.name = String(value.name || '').trim();
+        if (!who.name) return false;
+      }
+      if (JSON.stringify(canonical(taskWho(t))) === JSON.stringify(canonical(who))) return true;
+      if (schema3) { t.who = who; t.whoSince = now(); }
+      else t.owner = whoToOwner(who);
+    } else if (field === 'when') {
+      if (!value || !/^(today|next|later|date|event)$/.test(value.kind)) return false;
+      var when = { kind: value.kind };
+      if (when.kind === 'date') {
+        when.date = parseDate(value.date);
+        if (!when.date) { toast('Invalid calendar date'); return false; }
+      }
+      if (when.kind === 'event') {
+        when.event = String(value.event || '').trim();
+        if (!when.event) return false;
+      }
+      if (JSON.stringify(canonical(taskWhen(t))) === JSON.stringify(canonical(when))) return true;
+      if (schema3) { t.when = when; t.whenManual = true; }
+      else applyWhenSchema2(t, when);
+    } else if (field === 'kind') {
+      if (value !== 'task' && value !== 'idea') return false;
+      if (schema3) {
+        t.kind = value; t.when = { kind: 'later' }; t.whenManual = true;
+      } else {
+        t.section = value === 'idea' ? 'ideas' : 'longterm';
+        t.sectionManual = true;
+        applyWhenSchema2(t, { kind: 'later' });
+      }
+    } else if (field === 'title') {
+      if (String(value) === (t.title || t.text || '')) return true;
+      value = shortTitle(value);
+      if (!value) return false;
+      if (value === (t.title || t.text || '')) return true;
+      t.title = value; t.titleAuto = false;
+    } else if (field === 'note' || field === 'room') {
+      if (String(t[field] || '') === String(value)) return true;
+      t[field] = String(value);
+    } else return false;
+    touch(t, before);
+    return true;
   }
 
   /* ---------- drag ---------- */
@@ -672,7 +775,7 @@
     var el = document.elementFromPoint(x, y);
     var group = el && el.closest ? el.closest('.tgroup[data-trigger]') : null;
     if (group) return group;
-    var sec = el && el.closest ? el.closest('.sec[data-sec]') : null;
+    var sec = el && el.closest ? el.closest('.sec[data-when]') : null;
     return sec;
   }
   function updateGhost() {
@@ -704,14 +807,6 @@
     drag.before = taskSig(t);
     document.body.className +=
       (document.body.className ? ' ' : '') + 'dragging';
-    drag.allowRender = true;
-    render();
-    drag.allowRender = false;
-    drag.li = $('#list li.task[data-id="' + esc(drag.id) + '"]');
-    if (!drag.li) {
-      resetDrag();
-      return;
-    }
     drag.li.className += ' dragging-source';
     drag.ghost = drag.li.cloneNode(true);
     drag.ghost.className += ' drag-ghost';
@@ -765,32 +860,18 @@
     var wasActive = drag.active;
     var target = drag.target;
     var id = drag.id;
-    var before = drag.before;
-    var isGroup = target && target.getAttribute('data-trigger') != null;
-    var section = isGroup ? (target.getAttribute('data-gsec') || 'triggers') :
-      target && target.getAttribute('data-sec');
-    var trigger = isGroup ? target.getAttribute('data-trigger') : null;
+    var kind = target && target.getAttribute('data-when');
+    var event = target && target.getAttribute('data-trigger');
     resetDrag();
     if (!wasActive) return;
     swallowClick = true;
     setTimeout(function () { swallowClick = false; }, 350);
     if (cancel || !target) return;
     var t = byId(id);
-    if (!t || t.deleted || !section) return;
-    if (isGroup) {
-      if (t.section === section && triggerLabel(t) === trigger) return;
-      t.section = section;
-      t.sectionManual = true;
-      if (trigger) t.trigger = trigger;
-      else delete t.trigger;
-      t.triggerManual = true;
-      touch(t, before);
-      return;
-    }
-    if (section === t.section) return;
-    t.section = section;
-    t.sectionManual = true;
-    touch(t, before);
+    if (!t || t.deleted) return;
+    if (event != null) changeTask(t, 'when', { kind: 'event', event: event });
+    else if (kind === 'date' || kind === 'event') openEditor(t, kind);
+    else if (kind) changeTask(t, 'when', { kind: kind });
   }
   function beginPress(li, x, y, kind, pointerId) {
     if (!active || closing) return;
@@ -962,11 +1043,12 @@
       '<header class="top"><div class="row1"><h1>Tasks</h1>' +
       '<span class="count" id="count"></span><span class="spacer"></span>' +
       '<span class="sync" id="sync"></span>' +
-      '<button class="btn small" id="syncNow" title="Sync now">↻</button> ' +
-      '<button class="btn small" id="lock-button" data-tasks-lock title="Lock Tasks">Lock</button>' +
+      '<button class="btn small" id="searchButton" aria-label="Search tasks (/)" title="Search (/)">⌕</button>' +
       '<button class="btn small" id="moreButton" aria-label="More options" aria-expanded="false">⋯</button>' +
+      '<button class="btn small" id="lock-button" data-tasks-lock title="Lock Tasks">Lock</button>' +
       '</div><div id="moreMenu" class="more-menu" hidden>' +
-      '<details><summary>View</summary><button class="btn small" id="viewHidden">Toggle hidden tasks</button></details>' +
+      '<details><summary>View</summary><button class="btn small" id="viewDates">Toggle scheduled dates</button></details>' +
+      '<button class="btn small" id="syncNow">Sync now</button> ' +
       '<button class="btn small" data-tasks-settings>Settings</button> ' +
       '<button class="btn small" id="helpButton">Help</button>' +
       (demo ? ' <button class="btn small" id="resetDemo">Reset demo</button>' : '') +
@@ -974,38 +1056,53 @@
       '<strong>Keyboard shortcuts</strong><button class="btn small" id="helpClose">Close</button>' +
       '<p>j / k · Move between visible tasks<br>Enter · Expand focused task<br>' +
       '/ · Search<br>? · Help<br>Esc · Close editor, menu or help</p>' +
-      '<p>Editors: Enter or leave the field to save; Esc cancels. Shift+Enter adds a line to notes.</p>' +
+      '<p>Changes save automatically. Esc closes the editor.</p>' +
       '</section><form class="add" id="add" autocomplete="off">' +
-      '<input class="input" id="addText" placeholder="New task">' +
-      '<select class="select" id="addSec"></select>' +
+      '<input class="input" id="addText" aria-label="Add a task" placeholder="Add a task (Room: task works too)">' +
       '<button class="btn primary">Add</button></form>' +
-      '<div class="tools"><input class="input" id="q" type="search" ' +
-      'placeholder="Search"><label><input type="checkbox" id="showHidden">' +
-      ' hidden</label></div><div class="chips" id="ownerFilters">' +
-      '<button type="button" class="chip" data-owner="all">All</button>' +
-      '<button type="button" class="chip" data-owner="you">You</button>' +
-      '<button type="button" class="chip" data-owner="chase">Chase</button>' +
+      '<div class="tools" id="searchTools" hidden><input class="input" id="q" type="search" ' +
+      'aria-label="Search tasks" placeholder="Search tasks"></div>' +
+      '<div class="chips" id="ownerFilters">' +
+      '<button type="button" class="chip" data-owner="all">Everyone</button>' +
+      '<button type="button" class="chip" data-owner="me">My move</button>' +
+      '<button type="button" class="chip" data-owner="chase">Chasing</button>' +
       '<button type="button" class="chip" data-owner="waiting">Waiting</button>' +
-      '</div></header><main id="list"></main>' +
+      '<select class="select" id="roomFilter" aria-label="Filter by room"></select></div>' +
+      '<nav id="tabs" class="tabs" aria-label="Task views">' +
+      '<button type="button" data-tab="tasks">Tasks</button>' +
+      '<button type="button" data-tab="ideas">Ideas</button>' +
+      '<button type="button" data-tab="done">Done this week</button></nav></header><main id="list"></main>' +
       '<div class="toast" id="toast" role="status" aria-live="polite"></div>';
 
     $('#q').value = ui.query;
-    $('#showHidden').checked = ui.showHidden;
+    $('#searchTools').hidden = !ui.query;
     $('#add').onsubmit = function (e) {
       e.preventDefault();
       if (!active || closing) return;
-      addTask($('#addText').value, $('#addSec').value);
+      finishEditor(true);
+      addTask($('#addText').value);
       $('#addText').value = '';
     };
     $('#q').oninput = function () {
       if (!active || closing) return;
+      finishEditor(true);
       ui.query = this.value.toLowerCase();
       persistUi();
       render();
     };
-    $('#showHidden').onchange = function () {
-      if (!active || closing) return;
-      ui.showHidden = this.checked;
+    $('#searchButton').onclick = showSearch;
+    $('#roomFilter').onchange = function () {
+      var room = this.value;
+      finishEditor(true);
+      ui.roomFilter = room;
+      persistUi();
+      render();
+    };
+    $('#tabs').onclick = function (e) {
+      var button = e.target.closest('[data-tab]');
+      if (!button || !active || closing) return;
+      finishEditor(true);
+      ui.tab = button.getAttribute('data-tab');
       persistUi();
       render();
     };
@@ -1013,6 +1110,7 @@
       if (!active || closing) return;
       var button = e.target.closest('button');
       if (!button) return;
+      finishEditor(true);
       ui.ownerFilter = button.getAttribute('data-owner');
       persistUi();
       updateOwnerChips();
@@ -1023,9 +1121,10 @@
       $('#moreMenu').hidden = !$('#moreMenu').hidden;
       this.setAttribute('aria-expanded', String(!$('#moreMenu').hidden));
     };
-    $('#viewHidden').onclick = function () {
-      $('#showHidden').checked = !ui.showHidden;
-      $('#showHidden').onchange();
+    $('#viewDates').onclick = function () {
+      finishEditor(true);
+      ui.datesCollapsed = !ui.datesCollapsed;
+      persistUi(); render();
     };
     $('#helpButton').onclick = toggleHelp;
     $('#helpClose').onclick = closePanels;
@@ -1040,248 +1139,163 @@
     updateOwnerChips();
     setStatus(ui.status === 'idle' ? 'busy' : ui.status, ui.msg || 'Loading…');
   }
-  function moveOptions(current) {
-    return doc.sections.map(function (s) {
-      return '<option value="' + esc(s.id) + '"' +
-        (s.id === current ? ' selected' : '') + '>' +
-        esc(s.name) + '</option>';
-    }).join('');
+  function localDay(value) {
+    var d = new Date(value), month = d.getMonth() + 1, day = d.getDate();
+    return d.getFullYear() + '-' + (month < 10 ? '0' : '') + month + '-' + (day < 10 ? '0' : '') + day;
   }
-  function taskHtml(t) {
-    var hidden = isHidden(t);
-    var cls = 'task' + (t.done ? ' done' : '') +
-      (hidden ? ' hid' : '') + (ui.open[t.id] ? ' open' : '') +
-      (String(focusId) === String(t.id) ? ' focused' : '');
-    var owner = ownerInfo(t.owner);
-    var date = hidden ? triggerDate(t) : null;
-    var title = hidden ? (date ? shortDate(date) : '') :
-      shortTitle(t.title || t.text || '');
-    var detail = hidden ? '' : String(t.detail || '');
-    var note = hidden ? '' : String(t.note || '');
-    var expanded = [detail, note].filter(function (value) {
-      return value;
-    }).join('\n');
-    var trig = triggerLabel(t);
-    return '<li class="' + cls + '" data-id="' + esc(t.id) + '">' +
-      '<input type="checkbox"' + (t.done ? ' checked' : '') +
-      ' aria-label="Done #' + esc(t.label || t.id) + '">' +
-      '<div class="body"><button type="button" class="badge" data-act="copy" title="Copy task ID">#' +
-      esc(t.id) + '</button>' +
-      (owner.kind === 'you' ? '' : '<span class="owner ' + esc(owner.cls) + '">' +
-        esc(owner.label) + '</span>') +
-      '<span class="main">' +
-      (!hidden && t.room ? '<span class="room">' + esc(t.room) + ' · </span>' : '') +
-      (trig && t.section !== 'triggers' && t.done ?
-        '<span class="trig">' + esc(trig) + '</span>' : '') +
-      '<span class="txt">' + esc(title) + '</span></span>' +
-      (expanded ? '<div class="note">' + esc(expanded) + '</div>' : '') +
-      '<div class="acts">' +
-      '<button class="btn small" data-act="edit">Edit</button>' +
-      '<button class="btn small" data-act="note">Note</button>' +
-      '<button class="btn small" data-act="trigger">Trigger</button>' +
-      '<button class="btn small" data-act="hide">' +
-      (hidden ? 'Unhide' : 'Hide until…') + '</button>' +
-      '<label class="move-label">Move to <select class="select small move-sel">' +
-      moveOptions(t.section) + '</select></label>' +
-      '<button class="btn small delete" data-act="del">Delete</button>' +
-      '</div></div></li>';
+  function displayDay(value) {
+    return new Date(value + 'T12:00:00').toLocaleDateString(undefined,
+      { weekday: 'short', day: 'numeric', month: 'short' });
   }
-  function sectionGroupsHtml(sid, open) {
-    var plain = [], groups = Object.create(null), keys, html;
-    open.forEach(function (t) {
-      var label = triggerLabel(t);
-      if (!label) { plain.push(t); return; }
-      if (!groups[label]) groups[label] = [];
-      groups[label].push(t);
-    });
-    html = '<ul>' + plain.map(taskHtml).join('') +
-      (open.length ? '' : '<li class="drop-here">Drop here</li>') + '</ul>';
-    keys = Object.keys(groups).sort(function (a, b) {
-      return a.toLowerCase() < b.toLowerCase() ? -1 : a.toLowerCase() > b.toLowerCase() ? 1 : 0;
-    });
-    keys.forEach(function (key) {
-      var ck = sid + '\u0001' + key, tasks = groups[key];
-      var collapsed = !!ui.collapsedTriggers[ck];
-      html += '<div class="tgroup' + (collapsed ? ' collapsed' : '') +
-        '" data-trigger="' + esc(key) + '" data-gsec="' + esc(sid) + '">' +
-        '<button type="button" class="tgroup-h">' +
-        '<span class="caret">' + (collapsed ? '▸' : '▾') + '</span>' +
-        '<span class="tlabel">' + esc(key) + '</span>' +
-        '<span class="tcount">' + tasks.length + '</span></button>' +
-        '<ul>' + tasks.map(taskHtml).join('') + '</ul></div>';
-    });
-    return html;
+  function pillHtml(t) {
+    if (t.who.kind !== 'chase' && t.who.kind !== 'waiting') return '';
+    var since = Number(t.whoSince) || Date.parse(t.whoSince) || now();
+    var age = Math.max(0, Math.floor((now() - since) / 86400000));
+    return '<span class="owner ' + t.who.kind + (age >= 10 ? ' red' : age >= 5 ? ' amber' : '') +
+      '">' + esc((t.who.kind === 'chase' ? 'Chasing ' : 'Waiting on ') + (t.who.name || '') +
+      ' · ' + age + 'd') + '</span>';
   }
-  function triggerGroupsHtml(open) {
-    var dragging = (' ' + document.body.className + ' ').indexOf(' dragging ') !== -1;
-    var labels = Object.create(null);
+  function taskHtml(raw) {
+    var t = taskView(raw), title = t.title || t.text || '';
+    var date = t.when.kind === 'date' && t.when.date;
+    return '<li class="task' + (t.done ? ' done' : '') +
+      (String(focusId) === String(t.id) ? ' focused' : '') + '" data-id="' + esc(t.id) + '">' +
+      '<input type="checkbox"' + (t.done ? ' checked' : '') + ' aria-label="Done #' + esc(t.id) + '">' +
+      '<div class="body"><span class="main">' +
+      (t.room ? '<span class="room">' + esc(t.room) + ' · </span>' : '') +
+      '<span class="txt">' + esc(title) + '</span>' +
+      (date ? '<span class="date-tag">' + (date <= localDay(now()) ? 'from ' : '') + esc(displayDay(date)) + '</span>' : '') +
+      '</span>' + pillHtml(t) +
+      '<button type="button" class="badge" data-act="copy" title="Copy task ID">#' + esc(t.id) + '</button>' +
+      (t.detail && t.detail !== title ? '<div class="note">' + esc(t.detail) + '</div>' : '') +
+      '</div></li>';
+  }
+  function triggerGroupsHtml(tasks) {
     var groups = Object.create(null);
-    var i, label, keys, html = '';
-
-    for (i = 0; i < open.length; i++) {
-      label = triggerLabel(open[i]);
-      labels[label] = true;
-      if (!groups[label]) groups[label] = [];
-      groups[label].push(open[i]);
-    }
-    if (dragging) {
-      doc.tasks.forEach(function (t) {
-        var existing;
-        if (t.deleted) return;
-        existing = triggerLabel(t);
-        if (existing) labels[existing] = true;
-      });
-      labels[''] = true;
-    }
-
-    keys = Object.keys(labels).sort(function (a, b) {
-      if (a === '') return 1;
-      if (b === '') return -1;
-      return a.toLowerCase() < b.toLowerCase() ? -1 :
-        a.toLowerCase() > b.toLowerCase() ? 1 : a < b ? -1 : a > b ? 1 : 0;
+    tasks.forEach(function (t) {
+      var event = taskView(t).when.event || '';
+      if (!groups[event]) groups[event] = [];
+      groups[event].push(t);
     });
-    keys.forEach(function (key) {
-      var tasks = groups[key] || [];
-      var collapsed = !!ui.collapsedTriggers[key];
-      if (!tasks.length && !dragging) return;
-      html += '<div class="tgroup' + (collapsed ? ' collapsed' : '') +
-        '" data-trigger="' + esc(key) + '">' +
-        '<button type="button" class="tgroup-h">' +
-        '<span class="caret">' + (collapsed ? '▸' : '▾') + '</span>' +
-        '<span class="tlabel">' + esc(key || 'No trigger') + '</span>' +
-        '<span class="tcount">' + tasks.length + '</span></button>' +
-        '<ul>' + tasks.map(taskHtml).join('') +
-        (!tasks.length && dragging ? '<li class="drop-here">Drop here</li>' : '') +
-        '</ul></div>';
-    });
-    return html;
+    return Object.keys(groups).sort().map(function (event) {
+      var collapsed = !!ui.collapsedTriggers[event];
+      return '<div class="tgroup' + (collapsed ? ' collapsed' : '') + '" data-trigger="' + esc(event) + '">' +
+        '<button type="button" class="tgroup-h" aria-expanded="' + !collapsed + '">' +
+        '<span class="caret">' + (collapsed ? '▸' : '▾') + '</span><span class="tlabel">' +
+        esc(event) + '</span><span class="tcount">' + groups[event].length + '</span></button>' +
+        '<ul>' + groups[event].map(taskHtml).join('') + '</ul></div>';
+    }).join('');
   }
   function render() {
-    if (!active) return;
+    if (!active || editor) return;
     var list = $('#list');
     if (!list) return;
-    if (editor) return;
-    /* Never rebuild the list mid-drag: it would detach the touched node and
-       iOS/Chrome stop bubbling its touch events to document. */
-    if (drag.active && !drag.allowRender) {
-      drag.renderPending = true;
-      return;
-    }
-
-    var select = $('#addSec'), previous = select.value;
-    select.innerHTML = doc.sections.map(function (s) {
-      return '<option value="' + esc(s.id) + '">' + esc(s.name) + '</option>';
-    }).join('');
-    if (doc.sections.some(function (s) { return s.id === previous; })) {
-      select.value = previous;
-    }
-
-    var q = ui.query, openCount = 0, hiddenN = 0;
-    var anyVisible = false;
-    var html = doc.sections.map(function (s) {
-      var visible = doc.tasks.filter(function (t) {
-        if (t.deleted || t.section !== s.id) return false;
-        if (ui.ownerFilter !== 'all' &&
-            ownerInfo(t.owner).kind !== ui.ownerFilter) return false;
-        if (isHidden(t)) {
-          hiddenN += 1;
-          if (!ui.showHidden) return false;
-        }
-        if (!q) return true;
-        return ('#' + (t.label || t.id) + ' ' + (t.title || '') +
-          ' ' + (t.text || '') + ' ' + (t.detail || '') +
-          ' ' + (t.note || '') + ' ' + (t.room || '') + ' ' + triggerLabel(t) + ' ' +
-          (t.tags || []).join(' ')).
-          toLowerCase().indexOf(q) !== -1;
+    /* Do not detach the touched node while a drag is active. */
+    if (drag.active) { drag.renderPending = true; return; }
+    var rooms = Object.create(null), openCount = 0, today = localDay(now());
+    doc.tasks.forEach(function (raw) {
+      var t = taskView(raw);
+      if (t.deleted) return;
+      if (t.room) rooms[t.room] = true;
+      if (!t.done && t.kind !== 'idea') openCount++;
+    });
+    $('#roomFilter').innerHTML = '<option value="">Room · All rooms</option>' +
+      Object.keys(rooms).sort().map(function (room) {
+        return '<option value="' + esc(room) + '">' + esc(room) + '</option>';
+      }).join('');
+    $('#roomFilter').value = ui.roomFilter;
+    $('#count').textContent = openCount + ' open';
+    Array.prototype.forEach.call($('#tabs').querySelectorAll('[data-tab]'), function (button) {
+      var selected = button.getAttribute('data-tab') === ui.tab;
+      button.className = selected ? 'active' : '';
+      button.setAttribute('aria-current', selected ? 'page' : 'false');
+    });
+    updateOwnerChips();
+    var visible = doc.tasks.filter(function (raw) {
+      var t = taskView(raw);
+      if (t.deleted || (ui.ownerFilter !== 'all' && t.who.kind !== ui.ownerFilter) ||
+          (ui.roomFilter && t.room !== ui.roomFilter)) return false;
+      return !ui.query || [t.id, t.title, t.text, t.detail, t.note, t.room, t.who.name,
+        t.when.event, (t.tags || []).join(' ')].join(' ').toLowerCase().indexOf(ui.query) !== -1;
+    });
+    var html = '', filtered = ui.query || ui.ownerFilter !== 'all' || ui.roomFilter;
+    if (ui.tab === 'done') {
+      var monday = new Date(now()), days = Object.create(null);
+      monday.setHours(0, 0, 0, 0);
+      monday.setDate(monday.getDate() - (monday.getDay() + 6) % 7);
+      var end = new Date(monday.getTime()); end.setDate(end.getDate() + 7);
+      visible.filter(function (t) {
+        var stamp = Number(t.doneAt) || Date.parse(t.doneAt);
+        return t.done && stamp >= monday.getTime() && stamp < end.getTime();
+      }).sort(function (a, b) {
+        return (Number(b.doneAt) || Date.parse(b.doneAt)) - (Number(a.doneAt) || Date.parse(a.doneAt));
+      }).forEach(function (t) {
+        var day = localDay(Number(t.doneAt) || Date.parse(t.doneAt));
+        if (!days[day]) days[day] = [];
+        days[day].push(t);
       });
-      var open = visible.filter(function (t) { return !t.done; });
-      var done = visible.filter(function (t) { return t.done; });
-      openCount += open.length;
-      if (open.length || done.length) anyVisible = true;
-      if (!visible.length && (q || ui.ownerFilter !== 'all')) return '';
-      done.sort(function (a, b) {
-        return (b.doneAt || b.updatedAt || 0) -
-          (a.doneAt || a.updatedAt || 0);
+      html = Object.keys(days).sort().reverse().map(function (day) {
+        return '<section class="sec" data-day="' + day + '"><h2>' + esc(displayDay(day)) +
+          '</h2><ul>' + days[day].map(taskHtml).join('') + '</ul></section>';
+      }).join('');
+    } else if (ui.tab === 'ideas') {
+      html = '<ul>' + visible.filter(function (t) {
+        return !t.done && taskView(t).kind === 'idea';
+      }).map(taskHtml).join('') + '</ul>';
+    } else {
+      var groups = { today: [], next: [], event: [], later: [], date: [] };
+      visible.forEach(function (raw) {
+        var t = taskView(raw), kind = t.when.kind;
+        if (t.done || t.kind === 'idea') return;
+        if (kind === 'date' && t.when.date <= today) kind = 'today';
+        (groups[kind] || groups.next).push(raw);
       });
-      return '<section class="sec" data-sec="' + esc(s.id) + '"><h2>' +
-        esc(s.name) + ' <span>' + open.length + '</span></h2>' +
-        (s.id === 'triggers' ? triggerGroupsHtml(open) :
-          sectionGroupsHtml(s.id, open)) +
-        (done.length ?
-          '<details' + (q ? ' open' : '') + '><summary>Done (' +
-          done.length + ')</summary><ul>' +
-          done.map(taskHtml).join('') + '</ul></details>' : '') +
-        '</section>';
-    }).join('');
-    list.innerHTML = html + (anyVisible ? '' : '<p class="empty">No tasks.</p>');
-    $('#count').textContent = openCount + ' open' +
-      (hiddenN ? ' · ' + hiddenN + ' hidden' : '');
+      groups.date.sort(function (a, b) {
+        var x = taskView(a).when.date, y = taskView(b).when.date;
+        return x < y ? -1 : x > y ? 1 : 0;
+      });
+      var names = { today: 'Today', next: 'Next', event: 'After an event', later: 'Later', date: 'On a date' };
+      html = ['today', 'next', 'event', 'later', 'date'].map(function (kind) {
+        var tasks = groups[kind], collapsed = kind === 'date' && ui.datesCollapsed;
+        if (!tasks.length && filtered) return '';
+        return '<section class="sec' + (collapsed ? ' dates-collapsed' : '') +
+          '" data-when="' + kind + '"><h2>' +
+          (kind === 'date' ? '<button type="button" class="dates-toggle" aria-expanded="' + !collapsed + '">' +
+          (collapsed ? '▸ ' : '▾ ') : '') + names[kind] + ' <span>' + tasks.length + '</span>' +
+          (kind === 'date' ? '</button>' : '') + '</h2>' +
+          (kind === 'event' ? triggerGroupsHtml(tasks) : '<ul>' + tasks.map(taskHtml).join('') + '</ul>') +
+          '</section>';
+      }).join('');
+    }
+    list.innerHTML = html || '<p class="empty">No tasks.</p>';
   }
   function onListChange(e) {
-    if (!active || closing) return;
-    var li = e.target.closest('li.task');
-    var t, before;
-    if (!li) return;
-    t = byId(li.getAttribute('data-id'));
+    if (!active || closing || e.target.type !== 'checkbox') return;
+    var li = e.target.closest('li.task'), t = li && byId(li.getAttribute('data-id'));
     if (!t || t.deleted) return;
-    if (e.target.type === 'checkbox') {
-      t.done = e.target.checked;
-      if (t.done) t.doneAt = now();
-      else delete t.doneAt;
-      touch(t);
-    } else if (e.target.className &&
-        (' ' + e.target.className + ' ').indexOf(' move-sel ') !== -1) {
-      if (!doc.sections.some(function (s) { return s.id === e.target.value; })) return;
-      before = taskSig(t);
-      t.section = e.target.value;
-      t.sectionManual = true;
-      touch(t, before);
-    }
+    if (editor) finishEditor(true);
+    t.done = e.target.checked;
+    if (t.done) t.doneAt = now();
+    else delete t.doneAt;
+    touch(t);
   }
   function onListClick(e) {
     if (!active || closing) return;
-    var h = e.target.closest && e.target.closest('.tgroup-h');
+    var h = e.target.closest('.tgroup-h');
     if (h) {
-      var group = h.closest('.tgroup');
-      var label = group ? group.getAttribute('data-trigger') : '';
-      var gsec = group && group.getAttribute('data-gsec');
-      if (gsec) label = gsec + '\u0001' + label;
-      ui.collapsedTriggers[label] = !ui.collapsedTriggers[label];
-      if (!ui.collapsedTriggers[label]) delete ui.collapsedTriggers[label];
-      persistUi();
-      render();
-      return;
+      var event = h.closest('.tgroup').getAttribute('data-trigger');
+      ui.collapsedTriggers[event] = !ui.collapsedTriggers[event];
+      persistUi(); render(); return;
     }
-
-    var li = e.target.closest('li.task');
-    if (!li || e.target.type === 'checkbox' ||
-        (e.target.closest && e.target.closest('select,input,textarea,.inline-editor'))) return;
-    var t = byId(li.getAttribute('data-id'));
+    if (e.target.closest('.dates-toggle')) {
+      ui.datesCollapsed = !ui.datesCollapsed; persistUi(); render(); return;
+    }
+    if (e.target.closest('input,select,textarea,.inline-editor')) return;
+    var li = e.target.closest('li.task'), t = li && byId(li.getAttribute('data-id'));
     if (!t || t.deleted) return;
     var button = e.target.closest('button');
-    var action = button && button.getAttribute('data-act');
-    var before = taskSig(t);
-    if (!action) {
-      ui.open[t.id] = !ui.open[t.id];
-      render();
-      return;
-    }
-    if (action === 'copy') {
-      copyId(t.id);
-    } else if (action === 'edit' || action === 'note' || action === 'trigger' ||
-        (action === 'hide' && !isHidden(t))) {
-      openEditor(t, action, li);
-    } else if (action === 'hide') {
-      t.hidden = false;
-      delete t.hideUntil;
-      delete t.hideUntilDate;
-      touch(t, before);
-    } else if (action === 'del') {
-      var saved = clone(t);
-      t.deleted = true;
-      touch(t, before);
-      toast('Deleted #' + t.id, function () { restoreTask(saved); });
-    }
+    if (button && button.getAttribute('data-act') === 'copy') copyId(t.id);
+    else openEditor(t);
   }
 
   function restoreTask(saved) {
@@ -1308,64 +1322,148 @@
       navigator.clipboard.writeText(text).then(function () { toast('Copied ' + text); }, fallback);
     } else fallback();
   }
-  function openEditor(t, action, li) {
+  function suggestions(field) {
+    var values = Object.create(null);
+    doc.tasks.forEach(function (raw) {
+      var t = taskView(raw), value = field === 'names' ? t.who.name :
+        field === 'events' ? t.when.event : t.room;
+      if (!t.deleted && value) values[value] = true;
+    });
+    return Object.keys(values).sort().map(function (value) {
+      return '<option value="' + esc(value) + '"></option>';
+    }).join('');
+  }
+  function editorField(name, label, type, list) {
+    return '<label>' + label + '<input class="input" data-field="' + name +
+      '" type="' + (type || 'text') + '"' + (list ? ' list="' + list + '"' : '') + '></label>';
+  }
+  function openEditor(t, action) {
     if (editor) finishEditor(true);
-    ui.open[t.id] = true;
+    var view = taskView(t);
+    if (view.when.kind === 'date') ui.datesCollapsed = false;
+    if (view.when.kind === 'event') delete ui.collapsedTriggers[view.when.event];
     render();
-    li = $('#list li.task[data-id="' + t.id + '"]');
-    var wrap = document.createElement('div');
+    var li = $('#list li.task[data-id="' + esc(t.id) + '"]');
+    if (!li) return;
+    var wrap = document.createElement('div'), backdrop = document.createElement('div');
     wrap.className = 'inline-editor';
-    var label = document.createElement('label');
-    label.textContent = action === 'edit' ? 'Edit title' : action === 'hide' ?
-      'Hide until (YYYY-MM-DD or a trigger)' : action === 'note' ? 'Note' : 'Trigger';
-    var input = document.createElement(action === 'note' ? 'textarea' : 'input');
-    input.className = 'input';
-    input.value = action === 'edit' ? shortTitle(t.title || t.text || '') :
-      action === 'note' ? t.note || '' : action === 'trigger' ? triggerLabel(t) : '';
-    label.appendChild(input);
-    wrap.appendChild(label);
+    wrap.setAttribute('role', 'region');
+    wrap.setAttribute('aria-label', 'Edit task #' + t.id);
+    backdrop.className = 'editor-backdrop';
+    backdrop.onclick = function () { finishEditor(true); };
+    li.querySelector('.body').appendChild(backdrop);
+    wrap.innerHTML = '<div class="editor-heading"><strong>Edit task #' + esc(t.id) +
+      '</strong><button type="button" class="btn" data-act="close" aria-label="Close task editor">Close</button></div>' +
+      '<fieldset><legend>Who moves next</legend><div class="segments">' +
+      [['me', 'Me'], ['chase', 'Chasing'], ['waiting', 'Waiting on']].map(function (pair) {
+        return '<button type="button" data-who="' + pair[0] + '">' + pair[1] + '</button>';
+      }).join('') + '</div><div data-extra="who">' + editorField('whoName', 'Name', 'text', 'taskNames') +
+      '</div></fieldset><fieldset><legend>When</legend><div class="segments">' +
+      [['today', 'Today'], ['next', 'Next'], ['later', 'Later'], ['date', 'On a date…'], ['event', 'After an event…']].map(function (pair) {
+        return '<button type="button" data-when-choice="' + pair[0] + '">' + pair[1] + '</button>';
+      }).join('') + '</div><div data-extra="date">' + editorField('whenDate', 'Date', 'date') +
+      '</div><div data-extra="event">' + editorField('whenEvent', 'Event', 'text', 'taskEvents') +
+      '</div></fieldset>' + editorField('room', 'Room', 'text', 'taskRooms') +
+      editorField('title', 'Title') +
+      '<label>Note<textarea class="input" data-field="note"></textarea></label>' +
+      '<datalist id="taskNames">' + suggestions('names') + '</datalist>' +
+      '<datalist id="taskEvents">' + suggestions('events') + '</datalist>' +
+      '<datalist id="taskRooms">' + suggestions('rooms') + '</datalist>' +
+      '<div class="editor-actions">' +
+      (view.kind === 'idea' ? '<button type="button" class="btn" data-act="make-task">Make it a task</button>' : '') +
+      '<button type="button" class="btn delete" data-act="del">Delete task</button></div>';
     li.querySelector('.body').appendChild(wrap);
-    editor = { id: t.id, action: action, input: input };
-    input.onkeydown = function (e) {
-      if (e.key === 'Escape') {
-        e.preventDefault(); e.stopPropagation(); finishEditor(false);
-      } else if (e.key === 'Enter' && !(action === 'note' && e.shiftKey)) {
-        e.preventDefault(); e.stopPropagation(); finishEditor(true);
+    var values = { whoName: view.who.name || '', whenDate: view.when.date || '',
+      whenEvent: view.when.event || '', room: view.room || '', title: view.title || view.text || '', note: view.note || '' };
+    Object.keys(values).forEach(function (key) { wrap.querySelector('[data-field="' + key + '"]').value = values[key]; });
+    if (view.acceptedFrom) {
+      var provenance = document.createElement('div'), parts = [];
+      if (view.source) parts.push('Proposed by ' + view.source);
+      var stamp = view.acceptedAt || view.createdAt;
+      if (stamp) parts.push(displayDay(localDay(Number(stamp) || Date.parse(stamp))));
+      if (view.tags && view.tags.length) parts.push(view.tags.join(', '));
+      parts.push('Reference: ' + view.acceptedFrom);
+      provenance.className = 'provenance';
+      provenance.textContent = parts.join(' · ');
+      wrap.appendChild(provenance);
+    }
+    editor = { id: t.id, wrap: wrap, backdrop: backdrop, who: view.who.kind,
+      when: action === 'date' || action === 'event' ? action : view.when.kind };
+    function refreshChoices() {
+      Array.prototype.forEach.call(wrap.querySelectorAll('[data-who]'), function (button) {
+        button.setAttribute('aria-pressed', String(button.getAttribute('data-who') === editor.who));
+      });
+      Array.prototype.forEach.call(wrap.querySelectorAll('[data-when-choice]'), function (button) {
+        button.setAttribute('aria-pressed', String(button.getAttribute('data-when-choice') === editor.when));
+      });
+      wrap.querySelector('[data-extra="who"]').hidden = editor.who === 'me';
+      wrap.querySelector('[data-extra="date"]').hidden = editor.when !== 'date';
+      wrap.querySelector('[data-extra="event"]').hidden = editor.when !== 'event';
+    }
+    wrap.oninput = function (e) { saveEditorField(e.target); };
+    wrap.onchange = function (e) { saveEditorField(e.target); };
+    wrap.onclick = function (e) {
+      var button = e.target.closest('button');
+      if (!button || !editor || !active || closing) return;
+      t = byId(editor.id);
+      if (!t || t.deleted) { finishEditor(false); return; }
+      var who = button.getAttribute('data-who'), when = button.getAttribute('data-when-choice');
+      var act = button.getAttribute('data-act');
+      if (who) {
+        editor.who = who; refreshChoices();
+        saveEditorField(wrap.querySelector('[data-field="whoName"]'));
+        if (who !== 'me') wrap.querySelector('[data-field="whoName"]').focus();
+      } else if (when) {
+        editor.when = when; refreshChoices();
+        if (when === 'date' || when === 'event') {
+          var field = wrap.querySelector('[data-field="' + (when === 'date' ? 'whenDate' : 'whenEvent') + '"]');
+          saveEditorField(field); field.focus();
+        } else changeTask(t, 'when', { kind: when });
+      } else if (act === 'close') finishEditor(true);
+      else if (act === 'make-task') {
+        finishEditor(true); changeTask(t, 'kind', 'task');
+      } else if (act === 'del') {
+        var saved = clone(t);
+        finishEditor(false);
+        t.deleted = true; touch(t);
+        toast('Deleted #' + t.id, function () { restoreTask(saved); });
       }
     };
-    input.onblur = function () { finishEditor(true); };
-    input.focus();
+    wrap.onkeydown = function (e) {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finishEditor(true); }
+      else if (e.key === 'Enter' && e.target.tagName === 'INPUT') {
+        e.preventDefault(); e.stopPropagation(); saveEditorField(e.target);
+      }
+    };
+    refreshChoices();
+    wrap.querySelector('[data-field="' + (action === 'date' ? 'whenDate' : action === 'event' ? 'whenEvent' : 'title') + '"]').focus();
+  }
+  function saveEditorField(input) {
+    if (!editor || !input || !active || closing) return;
+    var field = input.getAttribute('data-field'), t = byId(editor.id), value = input.value;
+    if (!field || !t || t.deleted) return;
+    if (field === 'whoName') {
+      if (editor.who === 'me') changeTask(t, 'who', { kind: 'me' });
+      else if (value.trim()) changeTask(t, 'who', { kind: editor.who, name: value.trim() });
+    } else if (field === 'whenDate') {
+      if (editor.when === 'date' && value) changeTask(t, 'when', { kind: 'date', date: value });
+    } else if (field === 'whenEvent') {
+      if (editor.when === 'event' && value.trim()) changeTask(t, 'when', { kind: 'event', event: value.trim() });
+    } else changeTask(t, field, value);
   }
   function finishEditor(saveEdit) {
     if (!editor) return;
-    var edit = editor, t = byId(edit.id), value = edit.input.value;
+    if (saveEdit) saveEditorField(document.activeElement);
+    var id = editor.id;
     editor = null;
-    edit.input.onblur = null;
-    if (!saveEdit || !t || t.deleted || !active || closing) { render(); return; }
-    var before = taskSig(t);
-    if (edit.action === 'edit') {
-      t.title = shortTitle(value);
-      t.titleAuto = false;
-    } else if (edit.action === 'note') {
-      t.note = value;
-    } else if (edit.action === 'trigger') {
-      value = value.trim();
-      if (value) t.trigger = value;
-      else delete t.trigger;
-      t.triggerManual = true;
-    } else if (edit.action === 'hide' && value.trim()) {
-      value = value.trim();
-      var date = parseDate(value);
-      if (/^\d{4}-\d{2}-\d{2}$/.test(value) && !date) {
-        toast('Invalid calendar date'); render(); return;
-      }
-      t.hidden = true;
-      t.hideUntil = value;
-      if (date) t.hideUntilDate = date;
-      else delete t.hideUntilDate;
-    }
-    touch(t, before);
+    delete ui.open[id];
+    focusId = id;
     render();
+  }
+  function showSearch() {
+    finishEditor(true);
+    $('#searchTools').hidden = false;
+    $('#q').focus();
   }
   function closePanels() {
     $('#moreMenu').hidden = true;
@@ -1381,9 +1479,9 @@
     if (!active || closing || (' ' + document.body.className + ' ').indexOf(' auth-blocked ') !== -1) return;
     var target = e.target;
     if (target && (target.isContentEditable ||
-        target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"])'))) return;
+        target.closest('input,textarea,select,.inline-editor,[contenteditable]:not([contenteditable="false"])'))) return;
     if (e.ctrlKey || e.metaKey || e.altKey || $('dialog[open]')) return;
-    if (e.key === '/') { e.preventDefault(); $('#q').focus(); }
+    if (e.key === '/') { e.preventDefault(); showSearch(); }
     else if (e.key === '?') { e.preventDefault(); toggleHelp(); }
     else if (e.key === 'Escape') { finishEditor(false); closePanels(); }
     else if (e.key === 'j' || e.key === 'k' || e.key === 'Enter') {
@@ -1397,7 +1495,7 @@
       });
       if (e.key === 'Enter') {
         if (index < 0) return;
-        ui.open[focusId] = !ui.open[focusId]; render();
+        openEditor(byId(focusId));
       } else {
         index = index < 0 ? (e.key === 'j' ? 0 : rows.length - 1) :
           Math.max(0, Math.min(rows.length - 1, index + (e.key === 'j' ? 1 : -1)));
@@ -1421,7 +1519,7 @@
   function snapshot() {
     var records = {};
     records[DOC_KEY] = JSON.stringify({
-      repo: cfg.repo, path: cfg.path, branch: cfg.branch, doc: doc, meta: meta
+      repo: cfg.repo, path: cfg.path, branch: cfg.branch, doc: doc, meta: meta, view: collapseState()
     });
     return records;
   }
@@ -1431,6 +1529,10 @@
     if (stored.doc) {
       doc = validateDoc(stored.doc);
       meta = stored.meta || freshMeta();
+      if (stored.view) {
+        ui.datesCollapsed = stored.view.datesCollapsed !== false;
+        ui.collapsedTriggers = stored.view.collapsedTriggers || {};
+      }
     } else {
       doc = validateDoc(stored);
       var oldMeta = records[OLD_META_KEY] ? JSON.parse(records[OLD_META_KEY]) : {};
@@ -1635,7 +1737,9 @@
     ui = freshUi();
     var savedUi = load(UI_KEY, {});
     ui.query = savedUi.query || '';
-    ui.showHidden = !!savedUi.showHidden;
+    ui.roomFilter = savedUi.roomFilter || '';
+    ui.tab = /^(tasks|ideas|done)$/.test(savedUi.tab) ? savedUi.tab : 'tasks';
+    ui.datesCollapsed = savedUi.datesCollapsed !== false;
     ui.ownerFilter = savedUi.ownerFilter || 'all';
     ui.collapsedTriggers = savedUi.collapsedTriggers || {};
     active = true;

@@ -1,5 +1,5 @@
 # Tasks
-Static PWA. Tasks remain in the private `TunaIssaCoding/tasks-data` repository, `tasks.json` (schema 2). The public site contains only the app shell and, after setup, an encrypted `vault.json`.
+Static PWA. Tasks remain in the private `TunaIssaCoding/tasks-data` repository, `tasks.json`. The app reads and writes schema 2 or schema 3 without migrating the document. The public site contains only the app shell and, after setup, an encrypted `vault.json`.
 
 ## Unlock and setup
 
@@ -15,15 +15,19 @@ Lock gives sync at most 1.5 seconds, cancels stale requests, encrypts the local 
 
 ## Board controls and demo
 
-The board continues to read and write schema 2, with the existing section picker, owner filters, hidden checkbox, merge rules and native IDs starting at 5000. Rooms appear before titles; only chasing/waiting owners have pills. Click a grey ID to copy `#id`. The header shows relative sync time with an exact-time tooltip; the refresh button still syncs immediately.
+Tabs are **Tasks**, **Ideas**, and **Done this week**. Add always creates a task for **Me / Today**; `Room: task` prefixes set its room. Filter by Everyone, My move, Chasing, Waiting, or a room. Tasks group into Today, Next, After an event, Later, and On a date. Arrived dates appear in Today without changing stored data. Future dates start collapsed; event/date collapse state is remembered locally and protected with the offline cache on Lock.
 
-Expand a row to edit its title, note, trigger or hide-until value in place. Enter or blur saves; Escape cancels; Shift+Enter inserts a note line. Delete applies immediately, with a six-second Undo that restores the original task fields and advances its merge timestamp.
+Click a row to open its autosaving editor, or use the bottom sheet on screens up to 640px wide. Edit who moves next, when, room, title, and note; names, events, and rooms have suggestions. Escape closes the editor without undoing saved changes. Chasing/waiting pills show age, amber from five days and red from ten. Schema 3 uses `whoSince`, changed only when who changes; schema 2 uses `updatedAt`. Grey IDs copy `#id`.
+
+Drag a task onto a When header or named event group to move it. Date/event headers without a specific destination open the editor for a date/name. Ideas have **Make it a task**, which moves them to Later. Done this week starts Monday in local time; unticking restores the task. Delete is immediate with a six-second Undo.
 
 The top-right menu contains View, Settings and Help. Outside inputs and the lock/setup screens: `j`/`k` move the visible-row highlight, Enter expands it, `/` focuses search, `?` toggles Help, and Escape closes panels. The browser context menu is no longer intercepted.
 
-Open `./#demo` for 20 fictional tasks without unlocking or providing a token. Edits persist under `tasks-demo:` localStorage keys, never in the real board caches or vault. Demo boot skips authentication, IndexedDB, service-worker registration and data requests; sync reports “Demo · not synced”. The menu includes Reset demo with Undo. Lock and Leave demo return to `./`.
+Open `./#demo` for 25 fictional schema 3 tasks without unlocking or providing a token. Edits persist under `tasks-demo:v2:` localStorage keys, never in the real board caches or vault. Demo boot skips authentication, IndexedDB, service-worker registration and data requests; sync reports “Demo · not synced”. The menu includes Reset demo with Undo. Lock and Leave demo return to `./`.
 
-This release does not add schema 3, the new editor/grouping model, Inbox, or Listen. See [REPORT.md](REPORT.md) for Phase 1 verification and deferred brief items.
+Schema 2 edits retain legacy fields and unknown task/document values; schema 3 writes use the new fields and no sections. Task LWW and native ID collision remapping at IDs >= 5000 are unchanged. A clean session adopts a remotely migrated document. If migration occurs while local edits are pending, sync preserves those edits and reports a schema conflict instead of migrating or discarding them; reconcile pending edits before proceeding with migration.
+
+Inbox is deferred to phase 3.1; Listen remains parked. Provenance displays the source/date/tags available on the task and its `acceptedFrom` reference. A proposal ID alone cannot supply missing source metadata; this phase does not fetch Inbox. See [REPORT.md](REPORT.md) for Phase 2.1 verification and limits.
 
 ## Generate a vault locally
 
@@ -42,4 +46,4 @@ The token input is a raw single line. For `KEY=value` input, also set `TOKEN_KEY
 node --test --test-timeout=15000 tests/*.test.mjs
 ```
 
-Tests use synthetic inputs and mocked GitHub; no installs or real API calls. See [out/CHANGES.md](out/CHANGES.md) for implementation details, real test results, browser smoke coverage, and security limits.
+Tests use synthetic inputs and mocked GitHub; no installs or real API calls. See [REPORT.md](REPORT.md) for implementation details, real test results, browser smoke coverage, and verification limits.
