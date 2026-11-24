@@ -18,13 +18,20 @@ body.auth-blocked #app{display:none}
 .auth-card .primary{width:100%;margin-top:16px;padding:11px}
 .auth-card .field-help{font-size:12px;color:var(--muted);line-height:1.7}
 .auth-card details{margin:22px 0}.auth-card summary,dialog summary{cursor:pointer;color:var(--accent)}
+.auth-options{display:grid;justify-items:start;gap:14px;padding:16px 0 4px;font-size:13px}
+#setup-replacement{min-width:0;margin:22px 0 0;padding:16px;border:1px solid var(--line);border-radius:5px}
+#setup-replacement legend{padding:0 6px;font-size:13px;font-weight:600}
 .check-label{display:flex;align-items:center;gap:10px;margin:18px 0 8px}
 .check-label input{flex:0 0 auto;width:17px;height:17px;accent-color:var(--accent)}
 #unlock-error,#setup-error{color:var(--amber);min-height:1.6em;overflow-wrap:anywhere}
-#unlock-passkey{margin-bottom:12px}#security-section{border-bottom:1px solid var(--line);padding-bottom:16px;margin-bottom:18px}
+#unlock-passkey{display:block;width:100%;margin-top:10px;padding:11px}
+#security-section{border-bottom:1px solid var(--line);padding-bottom:16px;margin-bottom:18px}
+#connection-section{padding-bottom:10px}
+#advanced-connection{border-top:1px solid var(--line);padding-top:18px;margin-top:12px}
 #passkey-label{width:100%}#passkey-list{list-style:none;padding:0}
 #passkey-list li{display:flex;align-items:center;gap:12px;border-top:1px solid var(--line);padding:10px 0}
 #passkey-list span{flex:1;min-width:0;overflow-wrap:anywhere}
+#passkey-list button{flex:0 0 auto;max-width:55%;white-space:normal}
 #security-status{overflow-wrap:anywhere}
 dialog{border:1px solid var(--line);border-radius:9px;color:var(--text);background:var(--panel);padding:27px 30px;width:min(540px,calc(100vw - 24px));max-height:90vh;overflow:auto;box-shadow:0 20px 80px #0003}
 dialog::backdrop{background:#11182755}
@@ -35,4 +42,4 @@ dialog label{display:block;font-size:12px;margin:14px 0 5px;color:var(--muted)}
 dialog input{width:100%;color:var(--text)}
 dialog button{margin-top:8px}
 #auth-notice{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);max-width:90vw;background:#111827;color:#fff;border-radius:8px;padding:12px 18px;z-index:100;font-size:13px}
-@media(max-width:520px){dialog{padding:23px 20px}.row1 .count{display:none}.row1 .btn{padding:5px 7px;font-size:12px}.row1 .sync{max-width:100px;overflow:hidden;text-overflow:ellipsis}}
+@media(max-width:520px){dialog{padding:23px 20px}.row1 .btn{padding:5px 7px;font-size:12px}.row1 .sync{max-width:100px;overflow:hidden;text-overflow:ellipsis}}

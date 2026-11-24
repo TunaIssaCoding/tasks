@@ -1,8 +1,14 @@
-/* GitHub-backed Tasks PWA. Classic script; ES2017 syntax. No bundled task data. */
+/* GitHub-backed Tasks PWA. Classic script; retain older Safari syntax. */
 (function () {
   'use strict';
 
+  var demo = !!(window.location && window.location.hash === '#demo');
+  var storagePrefix = demo ? 'tasks-demo:' : '';
   var CFG_KEY = 'tasks.cfg', DOC_KEY = 'tasks.doc', OLD_META_KEY = 'tasks.meta', UI_KEY = 'tasks.ui';
+  CFG_KEY = storagePrefix + CFG_KEY;
+  DOC_KEY = storagePrefix + DOC_KEY;
+  OLD_META_KEY = storagePrefix + OLD_META_KEY;
+  UI_KEY = storagePrefix + UI_KEY;
   var netFails = 0;
   var NATIVE_MIN = 5000, POLL_MS = 15000;
   var SECTIONS = [
@@ -205,6 +211,7 @@
   var active = false, closing = false, generation = 0;
   var controller = null, syncPromise = null, lockPromise = null;
   var prepared = null, pendingModule = null, cacheUnavailable = false;
+  var editor = null, focusId = null, relativeTimer = 0;
 
   function freshMeta() {
     return { sha: null, dirty: false, lastSync: 0, base: emptyDoc() };
@@ -406,6 +413,10 @@
     });
   }
   function sync(flushing) {
+    if (demo) {
+      setStatus('idle', 'Demo · not synced');
+      return Promise.resolve();
+    }
     if (!active || !cfg.token || (closing && flushing !== true)) return Promise.resolve();
     if (syncing) {
       again = true;
@@ -489,8 +500,7 @@
         setStatus('busy', pending() + ' queued');
         again = true;
       } else {
-        setStatus('ok', 'Synced ' +
-          new Date(meta.lastSync).toLocaleTimeString());
+        setStatus('ok', relativeSync());
       }
     } catch (err) {
       if (!isCurrent(epoch)) return;
@@ -547,7 +557,7 @@
     }
     return null;
   }
-  /* Signature of user-visible fields; a no-op edit (e.g. dismissed prompt) must not win LWW. */
+  /* A no-op edit must not win LWW. */
   function taskSig(t) {
     var c = {}, k;
     for (k in t) if (k !== 'updatedAt' && k !== 'deviceId' && k.charAt(0) !== '_') c[k] = t[k];
@@ -888,16 +898,24 @@
       e.preventDefault();
       e.stopPropagation();
     }, true);
-    document.addEventListener('contextmenu', function (e) {
-      if (drag.press || drag.active ||
-          (e.target.closest && e.target.closest('li.task'))) {
-        e.preventDefault();
-      }
-    });
   }
 
   /* ---------- rendering ---------- */
 
+  function relativeSync() {
+    var minutes = Math.max(0, Math.floor((now() - meta.lastSync) / 60000));
+    if (!minutes) return 'Synced just now';
+    if (minutes < 60) return 'Synced ' + minutes + ' min ago';
+    var hours = Math.floor(minutes / 60);
+    if (hours < 24) return 'Synced ' + hours + ' hr ago';
+    return 'Synced ' + Math.floor(hours / 24) + ' days ago';
+  }
+  function refreshSyncTime() {
+    clearTimeout(relativeTimer);
+    if (!active) return;
+    if (!demo && ui.status === 'ok' && meta.lastSync) setStatus('ok', relativeSync());
+    relativeTimer = setTimeout(refreshSyncTime, 30000);
+  }
   function setStatus(kind, message) {
     if (!active) return;
     ui.status = kind;
@@ -906,15 +924,27 @@
     if (el) {
       el.className = 'sync ' + kind;
       el.textContent = message;
+      el.title = !demo && meta.lastSync ? new Date(meta.lastSync).toLocaleString() : '';
     }
   }
-  function toast(message) {
+  function toast(message, undo) {
     var el = $('#toast');
     if (!el) return;
-    el.textContent = message;
+    el.innerHTML = '<span>' + esc(message) + '</span>' +
+      (undo ? ' <button type="button" class="btn small" id="toastUndo">Undo</button>' : '');
     el.className = 'toast show';
     clearTimeout(toast.timer);
-    toast.timer = setTimeout(function () { el.className = 'toast'; }, 3000);
+    if (undo) $('#toastUndo').onclick = function () {
+      if (!active || closing) return;
+      clearTimeout(toast.timer);
+      el.className = 'toast';
+      el.innerHTML = '';
+      undo();
+    };
+    toast.timer = setTimeout(function () {
+      el.className = 'toast';
+      el.innerHTML = '';
+    }, undo ? 6000 : 3000);
   }
   function updateOwnerChips() {
     var wrap = $('#ownerFilters');
@@ -927,13 +957,25 @@
   function renderShell() {
     if (!active) return;
     $('#app').innerHTML =
+      (demo ? '<div class="demo-banner">Demo · fictional tasks · changes stay in this browser ' +
+        '<a href="./">Leave demo</a></div>' : '') +
       '<header class="top"><div class="row1"><h1>Tasks</h1>' +
       '<span class="count" id="count"></span><span class="spacer"></span>' +
       '<span class="sync" id="sync"></span>' +
       '<button class="btn small" id="syncNow" title="Sync now">↻</button> ' +
-      '<button class="btn small" data-tasks-settings title="Settings">Settings</button> ' +
       '<button class="btn small" id="lock-button" data-tasks-lock title="Lock Tasks">Lock</button>' +
-      '</div><form class="add" id="add" autocomplete="off">' +
+      '<button class="btn small" id="moreButton" aria-label="More options" aria-expanded="false">⋯</button>' +
+      '</div><div id="moreMenu" class="more-menu" hidden>' +
+      '<details><summary>View</summary><button class="btn small" id="viewHidden">Toggle hidden tasks</button></details>' +
+      '<button class="btn small" data-tasks-settings>Settings</button> ' +
+      '<button class="btn small" id="helpButton">Help</button>' +
+      (demo ? ' <button class="btn small" id="resetDemo">Reset demo</button>' : '') +
+      '</div><section id="helpPanel" class="help-panel" aria-label="Keyboard shortcuts" hidden>' +
+      '<strong>Keyboard shortcuts</strong><button class="btn small" id="helpClose">Close</button>' +
+      '<p>j / k · Move between visible tasks<br>Enter · Expand focused task<br>' +
+      '/ · Search<br>? · Help<br>Esc · Close editor, menu or help</p>' +
+      '<p>Editors: Enter or leave the field to save; Esc cancels. Shift+Enter adds a line to notes.</p>' +
+      '</section><form class="add" id="add" autocomplete="off">' +
       '<input class="input" id="addText" placeholder="New task">' +
       '<select class="select" id="addSec"></select>' +
       '<button class="btn primary">Add</button></form>' +
@@ -945,7 +987,7 @@
       '<button type="button" class="chip" data-owner="chase">Chase</button>' +
       '<button type="button" class="chip" data-owner="waiting">Waiting</button>' +
       '</div></header><main id="list"></main>' +
-      '<div class="toast" id="toast"></div>';
+      '<div class="toast" id="toast" role="status" aria-live="polite"></div>';
 
     $('#q').value = ui.query;
     $('#showHidden').checked = ui.showHidden;
@@ -977,6 +1019,21 @@
       render();
     };
     $('#syncNow').onclick = function () { sync(); };
+    $('#moreButton').onclick = function () {
+      $('#moreMenu').hidden = !$('#moreMenu').hidden;
+      this.setAttribute('aria-expanded', String(!$('#moreMenu').hidden));
+    };
+    $('#viewHidden').onclick = function () {
+      $('#showHidden').checked = !ui.showHidden;
+      $('#showHidden').onchange();
+    };
+    $('#helpButton').onclick = toggleHelp;
+    $('#helpClose').onclick = closePanels;
+    if (demo) {
+      $('#lock-button').onclick = function () { window.location.href = './'; };
+      $('#resetDemo').onclick = resetDemo;
+    }
+    refreshSyncTime();
     $('#list').addEventListener('click', onListClick);
     $('#list').addEventListener('change', onListChange);
     wireDrag();
@@ -993,7 +1050,8 @@
   function taskHtml(t) {
     var hidden = isHidden(t);
     var cls = 'task' + (t.done ? ' done' : '') +
-      (hidden ? ' hid' : '') + (ui.open[t.id] ? ' open' : '');
+      (hidden ? ' hid' : '') + (ui.open[t.id] ? ' open' : '') +
+      (String(focusId) === String(t.id) ? ' focused' : '');
     var owner = ownerInfo(t.owner);
     var date = hidden ? triggerDate(t) : null;
     var title = hidden ? (date ? shortDate(date) : '') :
@@ -1007,11 +1065,12 @@
     return '<li class="' + cls + '" data-id="' + esc(t.id) + '">' +
       '<input type="checkbox"' + (t.done ? ' checked' : '') +
       ' aria-label="Done #' + esc(t.label || t.id) + '">' +
-      '<div class="body"><span class="badge">#' +
-      esc(t.label || t.id) + '</span>' +
-      '<span class="owner ' + esc(owner.cls) + '">' +
-      esc(owner.label) + '</span>' +
+      '<div class="body"><button type="button" class="badge" data-act="copy" title="Copy task ID">#' +
+      esc(t.id) + '</button>' +
+      (owner.kind === 'you' ? '' : '<span class="owner ' + esc(owner.cls) + '">' +
+        esc(owner.label) + '</span>') +
       '<span class="main">' +
+      (!hidden && t.room ? '<span class="room">' + esc(t.room) + ' · </span>' : '') +
       (trig && t.section !== 'triggers' && t.done ?
         '<span class="trig">' + esc(trig) + '</span>' : '') +
       '<span class="txt">' + esc(title) + '</span></span>' +
@@ -1024,7 +1083,7 @@
       (hidden ? 'Unhide' : 'Hide until…') + '</button>' +
       '<label class="move-label">Move to <select class="select small move-sel">' +
       moveOptions(t.section) + '</select></label>' +
-      '<button class="btn small" data-act="del">Delete</button>' +
+      '<button class="btn small delete" data-act="del">Delete</button>' +
       '</div></div></li>';
   }
   function sectionGroupsHtml(sid, open) {
@@ -1101,6 +1160,7 @@
     if (!active) return;
     var list = $('#list');
     if (!list) return;
+    if (editor) return;
     /* Never rebuild the list mid-drag: it would detach the touched node and
        iOS/Chrome stop bubbling its touch events to document. */
     if (drag.active && !drag.allowRender) {
@@ -1130,7 +1190,7 @@
         if (!q) return true;
         return ('#' + (t.label || t.id) + ' ' + (t.title || '') +
           ' ' + (t.text || '') + ' ' + (t.detail || '') +
-          ' ' + (t.note || '') + ' ' + triggerLabel(t) + ' ' +
+          ' ' + (t.note || '') + ' ' + (t.room || '') + ' ' + triggerLabel(t) + ' ' +
           (t.tags || []).join(' ')).
           toLowerCase().indexOf(q) !== -1;
       });
@@ -1138,6 +1198,7 @@
       var done = visible.filter(function (t) { return t.done; });
       openCount += open.length;
       if (open.length || done.length) anyVisible = true;
+      if (!visible.length && (q || ui.ownerFilter !== 'all')) return '';
       done.sort(function (a, b) {
         return (b.doneAt || b.updatedAt || 0) -
           (a.doneAt || a.updatedAt || 0);
@@ -1194,70 +1255,161 @@
 
     var li = e.target.closest('li.task');
     if (!li || e.target.type === 'checkbox' ||
-        (e.target.closest && e.target.closest('select'))) return;
+        (e.target.closest && e.target.closest('select,input,textarea,.inline-editor'))) return;
     var t = byId(li.getAttribute('data-id'));
     if (!t || t.deleted) return;
     var button = e.target.closest('button');
     var action = button && button.getAttribute('data-act');
-    var value;
     var before = taskSig(t);
     if (!action) {
       ui.open[t.id] = !ui.open[t.id];
       render();
       return;
     }
-    if (action === 'edit') {
-      value = prompt('Edit title', shortTitle(t.title || t.text || ''));
-      if (value != null) {
-        t.title = shortTitle(value);
-        t.titleAuto = false;
-        touch(t, before);
-      }
-    } else if (action === 'note') {
-      value = prompt('Note', t.note || '');
-      if (value != null) {
-        t.note = value;
-        touch(t, before);
-      }
-    } else if (action === 'trigger') {
-      value = prompt('Trigger', triggerLabel(t));
-      if (value != null) {
-        value = value.trim();
-        if (value) t.trigger = value;
-        else delete t.trigger;
-        t.triggerManual = true;
-        touch(t, before);
-      }
+    if (action === 'copy') {
+      copyId(t.id);
+    } else if (action === 'edit' || action === 'note' || action === 'trigger' ||
+        (action === 'hide' && !isHidden(t))) {
+      openEditor(t, action, li);
     } else if (action === 'hide') {
-      if (isHidden(t)) {
-        t.hidden = false;
-        delete t.hideUntil;
-        delete t.hideUntilDate;
-        touch(t, before);
-      } else {
-        value = prompt('Hide until (YYYY-MM-DD or a trigger)', '');
-        if (value != null && value.trim()) {
-          value = value.trim();
-          var date = parseDate(value);
-          if (/^\d{4}-\d{2}-\d{2}$/.test(value) && !date) {
-            toast('Invalid calendar date');
-            return;
-          }
-          t.hidden = true;
-          t.hideUntil = value;
-          if (date) t.hideUntilDate = date;
-          else delete t.hideUntilDate;
-          touch(t, before);
-        }
-      }
+      t.hidden = false;
+      delete t.hideUntil;
+      delete t.hideUntilDate;
+      touch(t, before);
     } else if (action === 'del') {
-      if (confirm('Delete #' + (t.label || t.id) + '?')) {
-        t.deleted = true;
-        touch(t, before);
-        toast('Deleted #' + (t.label || t.id));
-      }
+      var saved = clone(t);
+      t.deleted = true;
+      touch(t, before);
+      toast('Deleted #' + t.id, function () { restoreTask(saved); });
     }
   }
+
+  function restoreTask(saved) {
+    var current = byId(saved.id), restored = clone(saved);
+    restored.updatedAt = Math.max(restored.updatedAt || 0, current ? current.updatedAt || 0 : 0);
+    if (current) doc.tasks[doc.tasks.indexOf(current)] = restored;
+    else doc.tasks.push(restored);
+    touch(restored);
+  }
+  function copyId(id) {
+    var text = '#' + id;
+    function fallback() {
+      var input = document.createElement('textarea');
+      input.value = text;
+      input.className = 'copy-buffer';
+      document.body.appendChild(input);
+      input.select();
+      var copied = false;
+      try { copied = document.execCommand('copy'); } catch (ignore) {}
+      document.body.removeChild(input);
+      toast(copied ? 'Copied ' + text : 'Copy unavailable · ' + text);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { toast('Copied ' + text); }, fallback);
+    } else fallback();
+  }
+  function openEditor(t, action, li) {
+    if (editor) finishEditor(true);
+    ui.open[t.id] = true;
+    render();
+    li = $('#list li.task[data-id="' + t.id + '"]');
+    var wrap = document.createElement('div');
+    wrap.className = 'inline-editor';
+    var label = document.createElement('label');
+    label.textContent = action === 'edit' ? 'Edit title' : action === 'hide' ?
+      'Hide until (YYYY-MM-DD or a trigger)' : action === 'note' ? 'Note' : 'Trigger';
+    var input = document.createElement(action === 'note' ? 'textarea' : 'input');
+    input.className = 'input';
+    input.value = action === 'edit' ? shortTitle(t.title || t.text || '') :
+      action === 'note' ? t.note || '' : action === 'trigger' ? triggerLabel(t) : '';
+    label.appendChild(input);
+    wrap.appendChild(label);
+    li.querySelector('.body').appendChild(wrap);
+    editor = { id: t.id, action: action, input: input };
+    input.onkeydown = function (e) {
+      if (e.key === 'Escape') {
+        e.preventDefault(); e.stopPropagation(); finishEditor(false);
+      } else if (e.key === 'Enter' && !(action === 'note' && e.shiftKey)) {
+        e.preventDefault(); e.stopPropagation(); finishEditor(true);
+      }
+    };
+    input.onblur = function () { finishEditor(true); };
+    input.focus();
+  }
+  function finishEditor(saveEdit) {
+    if (!editor) return;
+    var edit = editor, t = byId(edit.id), value = edit.input.value;
+    editor = null;
+    edit.input.onblur = null;
+    if (!saveEdit || !t || t.deleted || !active || closing) { render(); return; }
+    var before = taskSig(t);
+    if (edit.action === 'edit') {
+      t.title = shortTitle(value);
+      t.titleAuto = false;
+    } else if (edit.action === 'note') {
+      t.note = value;
+    } else if (edit.action === 'trigger') {
+      value = value.trim();
+      if (value) t.trigger = value;
+      else delete t.trigger;
+      t.triggerManual = true;
+    } else if (edit.action === 'hide' && value.trim()) {
+      value = value.trim();
+      var date = parseDate(value);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(value) && !date) {
+        toast('Invalid calendar date'); render(); return;
+      }
+      t.hidden = true;
+      t.hideUntil = value;
+      if (date) t.hideUntilDate = date;
+      else delete t.hideUntilDate;
+    }
+    touch(t, before);
+    render();
+  }
+  function closePanels() {
+    $('#moreMenu').hidden = true;
+    $('#moreButton').setAttribute('aria-expanded', 'false');
+    $('#helpPanel').hidden = true;
+  }
+  function toggleHelp() {
+    var show = $('#helpPanel').hidden;
+    closePanels();
+    $('#helpPanel').hidden = !show;
+  }
+  function keyboard(e) {
+    if (!active || closing || (' ' + document.body.className + ' ').indexOf(' auth-blocked ') !== -1) return;
+    var target = e.target;
+    if (target && (target.isContentEditable ||
+        target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"])'))) return;
+    if (e.ctrlKey || e.metaKey || e.altKey || $('dialog[open]')) return;
+    if (e.key === '/') { e.preventDefault(); $('#q').focus(); }
+    else if (e.key === '?') { e.preventDefault(); toggleHelp(); }
+    else if (e.key === 'Escape') { finishEditor(false); closePanels(); }
+    else if (e.key === 'j' || e.key === 'k' || e.key === 'Enter') {
+      var rows = Array.prototype.filter.call($('#list').querySelectorAll('li.task'), function (li) {
+        return li.getClientRects().length > 0;
+      });
+      if (!rows.length) return;
+      var index = -1;
+      rows.forEach(function (li, i) {
+        if (li.getAttribute('data-id') === String(focusId)) index = i;
+      });
+      if (e.key === 'Enter') {
+        if (index < 0) return;
+        ui.open[focusId] = !ui.open[focusId]; render();
+      } else {
+        index = index < 0 ? (e.key === 'j' ? 0 : rows.length - 1) :
+          Math.max(0, Math.min(rows.length - 1, index + (e.key === 'j' ? 1 : -1)));
+        focusId = rows[index].getAttribute('data-id');
+        rows.forEach(function (li) { li.className = li.className.replace(/\s*focused/g, ''); });
+        rows[index].className += ' focused';
+        rows[index].scrollIntoView({ block: 'nearest' });
+      }
+      e.preventDefault();
+    }
+  }
+  document.addEventListener('keydown', keyboard);
 
   /* ---------- authenticated lifecycle ---------- */
 
@@ -1290,6 +1442,7 @@
     updateDirty();
   }
   function prepare() {
+    if (demo) return Promise.resolve();
     if (prepared) return prepared;
     prepared = prepareCache().catch(function (error) {
       prepared = null;
@@ -1332,6 +1485,7 @@
 
   var wired = false;
   async function start(payload) {
+    if (demo) return startDemo();
     if (lockPromise) await lockPromise;
     if (active) throw new Error('Lock the current task session before opening another.');
     var epoch = ++generation;
@@ -1392,6 +1546,7 @@
   }
 
   function lock() {
+    if (demo) { window.location.href = './'; return Promise.resolve(); }
     if (lockPromise) return lockPromise;
     if (!active) {
       generation += 1;
@@ -1401,10 +1556,12 @@
     return lockPromise;
   }
   async function finishLock() {
+    finishEditor(true);
     closing = true;
     $('#app').inert = true;
     clearTimeout(pollTimer);
     clearTimeout(debounce);
+    clearTimeout(relativeTimer);
     resetDrag();
     persist();
     var timer;
@@ -1450,6 +1607,7 @@
       $('#app').inert = false;
       setStatus('err', 'Could not protect offline edits. Tasks remains unlocked; retry after storage is available.');
       poll();
+      refreshSyncTime();
       throw new Error('Could not protect offline edits. Tasks remains unlocked.');
     }
     active = false;
@@ -1460,6 +1618,7 @@
     doc = emptyDoc();
     meta = freshMeta();
     ui = freshUi();
+    focusId = null;
     storageError = '';
     clearTimeout(toast.timer);
     swallowClick = false;
@@ -1467,7 +1626,38 @@
     $('#app').inert = false;
   }
 
-  window.TasksApp = { prepare: prepare, start: start, lock: lock };
+  function startDemo() {
+    if (!demo || active) return;
+    var stored = load(DOC_KEY, null);
+    doc = stored && stored.doc ? validateDoc(stored.doc) : validateDoc(window.TasksDemoFixtures());
+    meta = freshMeta();
+    meta.base = clone(doc);
+    ui = freshUi();
+    var savedUi = load(UI_KEY, {});
+    ui.query = savedUi.query || '';
+    ui.showHidden = !!savedUi.showHidden;
+    ui.ownerFilter = savedUi.ownerFilter || 'all';
+    ui.collapsedTriggers = savedUi.collapsedTriggers || {};
+    active = true;
+    cfg.repo = 'demo/fictional'; cfg.path = 'tasks.json'; cfg.branch = 'local';
+    try { save(CFG_KEY, { deviceId: cfg.deviceId }); } catch (ignore) {}
+    document.body.className = document.body.className.replace(/\s*auth-blocked/g, '');
+    $('#lock-screen').hidden = true;
+    $('#setup-screen').hidden = true;
+    $('#app').inert = false;
+    renderShell(); render(); persist(); sync();
+  }
+  function resetDemo() {
+    var previous = clone(doc);
+    finishEditor(false);
+    doc = validateDoc(window.TasksDemoFixtures());
+    ui = freshUi(); focusId = null;
+    persist(); renderShell(); render(); sync();
+    toast('Demo reset', function () {
+      doc = previous; persist(); render();
+    });
+  }
+  window.TasksApp = { prepare: prepare, start: start, lock: lock, demo: demo, startDemo: startDemo };
   window.__tasks = {
     sync: sync,
     state: function () {

@@ -1,11 +1,12 @@
 /* Cache only explicitly allowlisted public shell resources. */
-var CACHE = 'tasks-shell-v12';
+var CACHE = 'tasks-shell-v13';
 var PREFIX = 'tasks-shell-';
 var ROOT = new URL('./', self.location.href);
 var SHELL = [
   './index.html',
-  './styles.css?v=12',
-  './app.js?v=12',
+  './styles.css?v=13',
+  './app.js?v=13',
+  './demo-fixtures.js?v=13',
   './auth/boot.js',
   './auth/auth.js',
   './auth/vault.js',

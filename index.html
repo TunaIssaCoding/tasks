@@ -12,7 +12,7 @@
 <link rel="apple-touch-icon" href="icon.svg">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="styles.css?v=12">
+<link rel="stylesheet" href="styles.css?v=13">
 <link rel="stylesheet" href="auth/lock.css">
 <title>Tasks</title>
 </head>
@@ -22,24 +22,30 @@
       <p class="section-eyebrow">YOUR PRIVATE TASKS BOARD</p>
       <h1 id="lock-title">Tasks</h1>
       <p>Locked. Unlock to open your board.</p>
-      <button id="unlock-passkey" class="primary" hidden>Unlock with passkey</button>
       <form id="unlock-form">
         <label for="unlock-password">Password</label>
         <input id="unlock-password" type="password" autocomplete="current-password" required>
+        <button id="unlock-submit" type="submit" class="primary" disabled>Unlock</button>
+        <button id="unlock-passkey" type="button" hidden>Unlock with passkey</button>
         <label class="check-label"><input id="unlock-remember" type="checkbox" checked>Remember this device</label>
         <p class="field-help">Only on a trusted device. Anyone using this browser profile can open your remembered board.</p>
-        <button id="unlock-submit" type="submit" class="primary" disabled>Unlock</button>
       </form>
       <p id="unlock-error" role="alert"></p>
       <button id="unlock-retry" hidden>Retry loading vault</button>
-      <a href="#setup" class="field-help">Set up or replace a vault</a>
+      <details id="unlock-options"><summary>Other options</summary>
+        <nav class="auth-options" aria-label="Vault options">
+          <a href="#setup">Set up a vault</a>
+          <a href="#replace">Replace vault</a>
+        </nav>
+      </details>
     </div>
   </section>
   <section id="setup-screen" class="auth-screen" aria-labelledby="setup-title" hidden>
     <div class="auth-card">
       <p class="section-eyebrow">A KEY TO YOUR TASKS</p>
-      <h1 id="setup-title">Tasks</h1>
-      <p>Set a password backup, then add a passkey in Settings for everyday unlocking.</p>
+      <h1 id="setup-title">Set up a vault</h1>
+      <p id="setup-description">Set a password backup, then add a passkey in Settings for everyday unlocking.</p>
+      <p id="setup-existing" hidden>A vault already exists. To replace it, use <a href="#replace">Replace vault</a>.</p>
       <form id="setup-form">
         <label for="setup-token">GitHub access token</label>
         <input id="setup-token" type="password" autocomplete="off" spellcheck="false" required>
@@ -58,8 +64,14 @@
           <label for="setup-site-branch">Site branch</label><input id="setup-site-branch" value="main" required autocomplete="off">
         </details>
         <label class="check-label"><input id="setup-remember" type="checkbox" checked>Remember this device</label>
-        <label class="check-label"><input id="setup-replace" type="checkbox">Replace the existing vault</label>
-        <p class="field-help">Replacement is irreversible: existing passkeys will stop working. Other remembered devices will lock when they see the new vault. You do not need the old password to replace it.</p>
+        <fieldset id="setup-replacement" hidden>
+          <legend>Confirm replacement</legend>
+          <p class="field-help">Replacement is irreversible: existing passkeys will stop working. Other remembered devices will lock when they see the new vault. You do not need the old password to replace it.</p>
+          <label for="setup-replace-text">Type REPLACE exactly</label>
+          <input id="setup-replace-text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="setup-replace-help">
+          <p id="setup-replace-help" class="field-help">Use the uppercase word REPLACE with no spaces.</p>
+          <label class="check-label"><input id="setup-replace" type="checkbox">Replace the existing vault</label>
+        </fieldset>
         <button id="setup-submit" class="primary" type="submit">Create vault and unlock</button>
       </form>
       <p id="setup-status" role="status"></p>
@@ -70,7 +82,11 @@
 <div id="app" inert></div>
 <div id="auth-notice" role="status" hidden></div>
 <dialog id="settings-dialog" aria-labelledby="settings-title">
-  <header class="dialog-header"><div><span class="section-eyebrow">YOUR DATA, YOUR REPOSITORY</span><h2 id="settings-title">Connection &amp; settings</h2></div><button type="button" id="settings-close" aria-label="Close settings">Close</button></header>
+  <header class="dialog-header"><div><span class="section-eyebrow">YOUR DATA, YOUR REPOSITORY</span><h2 id="settings-title">Settings</h2></div><button type="button" id="settings-close" aria-label="Close settings">Close</button></header>
+  <section id="demo-settings" hidden>
+    <h3>Local demo</h3>
+    <p>Fictional tasks and edits stay in this browser, separate from your private board. No vault, account, token, or connection is used. Use Reset demo in the menu to restore the sample tasks.</p>
+  </section>
     <section id="security-section" hidden>
       <h3>Security</h3>
       <p>Use a passkey as your primary key; keep your password as backup.</p>
@@ -89,6 +105,14 @@
       </details>
       <p id="security-status" role="status"></p>
     </section>
+  <section id="connection-section">
+    <h3>Connection</h3>
+    <p id="connection-summary">Your GitHub connection is encrypted in the vault. Unlock to connect your private task repository.</p>
+    <nav class="auth-options" aria-label="Connection options">
+      <a href="#setup" id="settings-setup">Set up a vault</a>
+      <a href="#replace" id="settings-replace">Replace vault</a>
+    </nav>
+  </section>
   <details id="advanced-connection" hidden><summary>Advanced: connect with a token</summary>
     <form id="settings-form">
       <p>Only available before a vault exists. This connection lasts until Lock or reload; the token is never saved in plaintext.</p>
@@ -96,11 +120,11 @@
       <p class="field-help">Grant Contents read and write on TunaIssaCoding/tasks-data. Use setup for password and passkey unlocking.</p>
       <button type="submit" class="primary">Connect</button>
     </form>
+    <p id="connection-result" role="alert"></p>
   </details>
-  <p id="connection-result" role="alert"></p>
-  <p><a href="#setup" id="settings-setup">Set up or replace a vault</a></p>
 </dialog>
-<script src="app.js?v=12"></script>
+<script src="demo-fixtures.js?v=13"></script>
+<script src="app.js?v=13"></script>
 <script type="module" src="auth/boot.js"></script>
 </body>
 </html>

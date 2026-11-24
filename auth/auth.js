@@ -44,7 +44,7 @@ export class VaultAccess {
   constructor({ connect, disconnect, notify }) {
     this.connect = connect; this.disconnect = disconnect; this.notify = notify;
     this.session = null; this.vault = null; this.remember = false; this.busy = false; this.generation = 0;
-    this.manual = false; this.vaultMissing = false;
+    this.manual = false; this.vaultMissing = false; this.setupMode = 'setup';
     $('#unlock-form').addEventListener('submit', event => { event.preventDefault(); void this.unlock(false); });
     $('#unlock-passkey').addEventListener('click', () => { void this.unlock(true); });
     $('#unlock-retry').addEventListener('click', () => { void this.start(); });
@@ -64,13 +64,24 @@ export class VaultAccess {
     for (const [input, hint] of [['#setup-password', '#setup-strength'], ['#new-password', '#password-strength']]) {
       $(input).addEventListener('input', () => { $(hint).textContent = `${strength($(input).value)} · Use 4 or 5 random words.`; });
     }
-    $('#setup-back').addEventListener('click', event => { event.preventDefault(); history.replaceState(null, '', location.pathname + location.search); void this.start(); });
-    $('#settings-setup').addEventListener('click', event => {
-      event.preventDefault(); $('#settings-dialog').close();
-      if (location.hash !== '#setup') history.pushState(null, '', '#setup');
-      void this.openSetup();
+    $('#setup-back').addEventListener('click', event => {
+      event.preventDefault();
+      if (this.busy) return;
+      history.replaceState(null, '', location.pathname + location.search); void this.start();
     });
-    window.addEventListener('hashchange', () => { if (location.hash === '#setup') void this.openSetup(); });
+    for (const [id, route] of [['#settings-setup', '#setup'], ['#settings-replace', '#replace']]) {
+      $(id).addEventListener('click', event => {
+        event.preventDefault();
+        if (this.busy) return;
+        $('#settings-dialog').close();
+        if (location.hash !== route) history.pushState(null, '', route);
+        void this.openSetup(route === '#replace');
+      });
+    }
+    window.addEventListener('hashchange', () => {
+      if (location.hash === '#setup' || location.hash === '#replace') void this.openSetup(location.hash === '#replace');
+      else if (!$('#setup-screen').hidden) void this.start();
+    });
     $('#settings-dialog').addEventListener('close', () => clearInputs('#current-password', '#new-password', '#confirm-password', '#advanced-token'));
   }
   get unlocked() { return Boolean(this.session); }
@@ -92,6 +103,22 @@ export class VaultAccess {
     $('#security-section').hidden = !this.unlocked;
     $('#advanced-connection').hidden = !this.vaultMissing;
   }
+  showSetup(replace) {
+    this.setupMode = replace ? 'replace' : 'setup';
+    $('#setup-title').textContent = replace ? 'Replace vault' : 'Set up a vault';
+    $('#setup-description').textContent = replace
+      ? 'Create a new vault and new keys for your board. Your task data is not deleted.'
+      : 'Set a password backup, then add a passkey in Settings for everyday unlocking.';
+    $('#setup-replacement').hidden = !replace;
+    $('#setup-replace-text').required = replace;
+    $('#setup-replace').required = replace;
+    $('#setup-replace').checked = false;
+    clearInputs('#setup-replace-text', '#setup-token', '#setup-password', '#setup-confirm');
+    $('#setup-submit').textContent = replace ? 'Replace vault and unlock' : 'Create vault and unlock';
+    $('#setup-existing').hidden = replace || !this.vault;
+    $('#setup-error').textContent = ''; $('#setup-status').textContent = '';
+    this.show('setup');
+  }
   async showLock(message = '') {
     this.show('lock'); $('#unlock-error').textContent = message;
     $('#unlock-submit').disabled = !this.vault; $('#unlock-password').disabled = !this.vault;
@@ -107,7 +134,7 @@ export class VaultAccess {
     await this.showLock('Loading vault…');
     let restored;
     try {
-      restored = location.hash === '#setup' ? null : await loadRemembered();
+      restored = location.hash === '#setup' || location.hash === '#replace' ? null : await loadRemembered();
       let vault;
       try { vault = await fetchPublicVault(); }
       catch (error) {
@@ -122,13 +149,13 @@ export class VaultAccess {
         restored.dek.fill(0); restored = null;
         await deleteRemembered();
       }
-      if (location.hash === '#setup') this.show('setup');
+      if (location.hash === '#setup' || location.hash === '#replace') this.showSetup(location.hash === '#replace');
       else if (restored) {
         // Never roll a just-saved security edit back to an older Pages publication.
         if (vault.updated_at >= restored.vault.updated_at) restored.vault = vault;
         await this.accept(restored, true);
       } else if (vault) await this.showLock();
-      else this.show('setup');
+      else this.showSetup(false);
     } catch (error) {
       if (generation === this.generation) await this.showLock(this.message(error));
     } finally { this.busy = false; }
@@ -179,12 +206,18 @@ export class VaultAccess {
   }
   async setup() {
     if (this.busy) return;
-    const label = { element: $('#setup-submit'), normal: 'Create vault and unlock', busy: 'Encrypting and saving…' };
+    const replace = this.setupMode === 'replace';
+    const label = { element: $('#setup-submit'), normal: replace ? 'Replace vault and unlock' : 'Create vault and unlock', busy: 'Encrypting and saving…' };
     this.setBusy(true, '#setup-screen', label); $('#setup-error').textContent = ''; $('#setup-status').textContent = '';
     let created;
     try {
+      if (replace) {
+        if (location.hash !== '#replace' || $('#setup-replace-text').value !== 'REPLACE') throw new Error('Type REPLACE exactly to replace the vault.');
+        if (!$('#setup-replace').checked) throw new Error('Tick “Replace the existing vault” to confirm. Existing passkeys will stop working.');
+      } else if (this.vault || location.hash === '#replace') {
+        throw new Error('A vault already exists. Use Replace vault in Other options to replace it.');
+      }
       passwordRules($('#setup-password').value, $('#setup-confirm').value);
-      if (this.vault && !$('#setup-replace').checked) throw new Error('A vault already exists. Tick “Replace the existing vault” to replace it. Existing passkeys will stop working.');
       const payload = {
         token: $('#setup-token').value.trim(), owner: $('#setup-owner').value.trim(), repo: $('#setup-repo').value.trim(), path: $('#setup-path').value.trim(), branch: $('#setup-branch').value.trim(),
         site_repo: $('#setup-site-repo').value.trim(), site_branch: $('#setup-site-branch').value.trim(),
@@ -192,18 +225,18 @@ export class VaultAccess {
       if (!payload.token) throw new Error('Enter the GitHub access token.');
       await checkPrivateRepository(payload);
       created = await createVault(payload, $('#setup-password').value);
-      await publishVault(payload, created.vault, $('#setup-replace').checked);
+      await publishVault(payload, created.vault, replace);
       await this.accept(created, $('#setup-remember').checked);
       clearInputs('#setup-token');
       $('#setup-status').textContent = SAVED; this.notify(SAVED);
     } catch (error) { $('#setup-error').textContent = this.message(error); if (created && created !== this.session) created.dek.fill(0); }
     finally { clearInputs('#setup-token', '#setup-password', '#setup-confirm'); this.setBusy(false, '#setup-screen', label); }
   }
-  async openSetup() {
+  async openSetup(replace = location.hash === '#replace') {
     if (this.busy) return;
     if ((this.session || this.manual) && !await this.lock()) return;
     ++this.generation;
-    this.show('setup');
+    this.showSetup(replace);
   }
   async connectManual() {
     if (this.busy || !this.vaultMissing) return;
@@ -247,7 +280,7 @@ export class VaultAccess {
     catch { this.notify('Device storage could not be cleared. Clear this site’s browser data before leaving a shared device.'); }
     if (this.session) { this.session.dek.fill(0); this.session.payload.token = ''; }
     this.session = null; this.manual = false; this.remember = false; this.vault = nextVault;
-    clearInputs('#unlock-password', '#current-password', '#new-password', '#confirm-password', '#setup-token', '#setup-password', '#setup-confirm', '#advanced-token');
+    clearInputs('#unlock-password', '#current-password', '#new-password', '#confirm-password', '#setup-token', '#setup-password', '#setup-confirm', '#setup-replace-text', '#advanced-token');
     $('#passkey-list').replaceChildren(); $('#security-status').textContent = '';
     this.setBusy(false, '#security-section');
     await this.showLock(message);
@@ -255,14 +288,31 @@ export class VaultAccess {
   }
   renderSecurity() {
     $('#security-section').hidden = !this.session;
+    $('#connection-summary').textContent = this.session
+      ? 'Connected through your encrypted vault. Lock clears this device’s unlocked session.'
+      : this.manual
+        ? 'Connected for this session only. Lock or reload clears this token connection.'
+        : 'Your GitHub connection is encrypted in the vault. Unlock to connect your private task repository.';
     if (!this.session) return;
     $('#passkey-label').value ||= defaultPasskeyLabel();
     const list = $('#passkey-list'); list.replaceChildren();
+    const session = this.session, generation = this.generation, vault = this.vault;
     for (const slot of this.vault.slots.filter(slot => slot.type === 'passkey')) {
       const row = document.createElement('li'), label = document.createElement('span'), remove = document.createElement('button');
       label.textContent = `${slot.label} · ${new Date(slot.created_at).toLocaleDateString()}`;
       remove.textContent = 'Remove'; remove.type = 'button'; remove.dataset.slotId = slot.id;
-      remove.addEventListener('click', () => { if (confirm('Remove this passkey? It will no longer unlock this board.')) void this.securityChange(() => removeSlot(this.vault, slot.id)); });
+      let armedUntil = 0, timer;
+      remove.addEventListener('click', () => {
+        if (this.busy || this.session !== session || this.generation !== generation || this.vault !== vault || !remove.isConnected || !$('#settings-dialog').open) return;
+        if (armedUntil > Date.now()) {
+          clearTimeout(timer); armedUntil = 0; remove.textContent = 'Remove';
+          void this.securityChange(base => removeSlot(base, slot.id));
+          return;
+        }
+        armedUntil = Date.now() + 5000;
+        remove.textContent = 'Remove passkey? Click again';
+        timer = setTimeout(() => { armedUntil = 0; remove.textContent = 'Remove'; }, 5000);
+      });
       row.append(label, remove); list.append(row);
     }
   }
