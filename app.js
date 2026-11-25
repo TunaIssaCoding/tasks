@@ -113,6 +113,41 @@
     view.whoSince = doc.schema === 3 ? (t.whoSince || 0) : (t.updatedAt || 0);
     return view;
   }
+  /* Added date: prefer open.md `logged` (YYYY-MM-DD, local midnight), else createdAt. 0 means undated. */
+  function addedAt(t) {
+    var logged = t.logged && String(t.logged).slice(0, 10);
+    if (logged && /^\d{4}-\d{2}-\d{2}$/.test(logged)) {
+      var parts = logged.split('-');
+      var d = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+      if (!isNaN(d.getTime())) return d.getTime();
+    }
+    var ts = Number(t.createdAt) || Date.parse(t.createdAt);
+    return ts || 0;
+  }
+  function addedAgeDays(t) {
+    var at = addedAt(t);
+    if (!at) return null;
+    return Math.max(0, Math.floor((now() - at) / 86400000));
+  }
+  function isOwnTask(t) {
+    return taskWho(t).kind === 'me';
+  }
+  /* Stale = Tuna's own open task (not chasing / waiting on someone else), added more than 3 days ago. */
+  function isStaleTask(t) {
+    if (t.done || t.deleted) return false;
+    if (!isOwnTask(t)) return false;
+    var age = addedAgeDays(t);
+    return age !== null && age > 3;
+  }
+  function sortByAdded(tasks) {
+    return tasks.sort(function (a, b) {
+      var ax = addedAt(a), bx = addedAt(b);
+      if (!ax && !bx) return (b.id - a.id);
+      if (!ax) return 1;
+      if (!bx) return -1;
+      return (bx - ax) || (b.id - a.id);
+    });
+  }
   function whoToOwner(who) {
     var name = String(who.name || '').trim();
     return (who.kind === 'chase' || who.kind === 'waiting') && name ? who.kind + ':' + name : 'you';
@@ -1487,6 +1522,7 @@
       '<button type="button" class="chip" data-owner="me">My move</button>' +
       '<button type="button" class="chip" data-owner="chase">Chasing</button>' +
       '<button type="button" class="chip" data-owner="waiting">Waiting</button>' +
+      '<button type="button" class="chip" data-owner="stale">Stale</button>' +
       '<select class="select" id="roomFilter" aria-label="Filter by room"></select></div>' +
       '<nav id="tabs" class="tabs" aria-label="Task views">' +
       '<button type="button" data-tab="inbox">Inbox (0)</button>' +
@@ -1569,12 +1605,19 @@
       { weekday: 'short', day: 'numeric', month: 'short' });
   }
   function pillHtml(t) {
-    if (t.who.kind !== 'chase' && t.who.kind !== 'waiting') return '';
-    var since = Number(t.whoSince) || Date.parse(t.whoSince) || now();
-    var age = Math.max(0, Math.floor((now() - since) / 86400000));
-    return '<span class="owner ' + t.who.kind + (age >= 10 ? ' red' : age >= 5 ? ' amber' : '') +
-      '">' + esc((t.who.kind === 'chase' ? 'Chasing ' : 'Waiting on ') + (t.who.name || '') +
-      ' · ' + age + 'd') + '</span>';
+    if (t.who.kind === 'chase' || t.who.kind === 'waiting') {
+      var since = Number(t.whoSince) || Date.parse(t.whoSince) || now();
+      var age = Math.max(0, Math.floor((now() - since) / 86400000));
+      return '<span class="owner ' + t.who.kind + (age >= 10 ? ' red' : age >= 5 ? ' amber' : '') +
+        '">' + esc((t.who.kind === 'chase' ? 'Chasing ' : 'Waiting on ') + (t.who.name || '') +
+        ' · ' + age + 'd') + '</span>';
+    }
+    if (t.who.kind === 'me' && !t.done) {
+      var ownAge = addedAgeDays(t);
+      if (ownAge === null) return '';
+      return '<span class="owner me">' + esc('You · ' + ownAge + 'd') + '</span>';
+    }
+    return '';
   }
   function taskHtml(raw) {
     var t = taskView(raw), title = t.title || t.text || '';
@@ -1598,6 +1641,7 @@
       if (!groups[event]) groups[event] = [];
       groups[event].push(t);
     });
+    Object.keys(groups).forEach(function (event) { sortByAdded(groups[event]); });
     return Object.keys(groups).sort().map(function (event) {
       var collapsed = !!ui.collapsedTriggers[event];
       return '<div class="tgroup' + (collapsed ? ' collapsed' : '') + '" data-trigger="' + esc(event) + '">' +
@@ -1645,8 +1689,10 @@
     }
     var visible = doc.tasks.filter(function (raw) {
       var t = taskView(raw);
-      if (t.deleted || (ui.ownerFilter !== 'all' && t.who.kind !== ui.ownerFilter) ||
-          (ui.roomFilter && t.room !== ui.roomFilter)) return false;
+      if (t.deleted) return false;
+      if (ui.ownerFilter === 'stale') { if (!isStaleTask(t)) return false; }
+      else if (ui.ownerFilter !== 'all' && t.who.kind !== ui.ownerFilter) return false;
+      if (ui.roomFilter && t.room !== ui.roomFilter) return false;
       return !ui.query || [t.id, t.title, t.text, t.detail, t.note, t.room, t.who.name,
         t.when.event, (t.tags || []).join(' ')].join(' ').toLowerCase().indexOf(ui.query) !== -1;
     });
@@ -1671,9 +1717,9 @@
           '</h2><ul>' + days[day].map(taskHtml).join('') + '</ul></section>';
       }).join('');
     } else if (ui.tab === 'ideas') {
-      html = '<ul>' + visible.filter(function (t) {
+      html = '<ul>' + sortByAdded(visible.filter(function (t) {
         return !t.done && taskView(t).kind === 'idea';
-      }).map(taskHtml).join('') + '</ul>';
+      })).map(taskHtml).join('') + '</ul>';
     } else {
       var groups = { today: [], next: [], event: [], later: [], date: [] };
       visible.forEach(function (raw) {
@@ -1682,9 +1728,8 @@
         if (kind === 'date' && t.when.date <= today) kind = 'today';
         (groups[kind] || groups.next).push(raw);
       });
-      groups.date.sort(function (a, b) {
-        var x = taskView(a).when.date, y = taskView(b).when.date;
-        return x < y ? -1 : x > y ? 1 : 0;
+      ['today', 'next', 'event', 'later', 'date'].forEach(function (kind) {
+        sortByAdded(groups[kind]);
       });
       var names = { today: 'Today', next: 'Next', event: 'After an event', later: 'Later', date: 'On a date' };
       html = ['today', 'next', 'event', 'later', 'date'].map(function (kind) {
@@ -2222,7 +2267,7 @@
     ui.roomFilter = savedUi.roomFilter || '';
     ui.tab = /^(inbox|tasks|ideas|done)$/.test(savedUi.tab) ? savedUi.tab : 'tasks';
     ui.datesCollapsed = savedUi.datesCollapsed !== false;
-    ui.ownerFilter = savedUi.ownerFilter || 'all';
+    ui.ownerFilter = /^(all|me|chase|waiting|stale)$/.test(savedUi.ownerFilter) ? savedUi.ownerFilter : 'all';
     ui.collapsedTriggers = savedUi.collapsedTriggers || {};
     active = true;
     cfg.repo = 'demo/fictional'; cfg.path = 'tasks.json'; cfg.branch = 'local';
