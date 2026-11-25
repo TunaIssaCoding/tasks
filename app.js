@@ -132,10 +132,9 @@
   function isOwnTask(t) {
     return taskWho(t).kind === 'me';
   }
-  /* Stale = Tuna's own open task (not chasing / waiting on someone else), added more than 3 days ago. */
+  /* Stale = any open task (own, chasing, or waiting) added more than 3 days ago. */
   function isStaleTask(t) {
     if (t.done || t.deleted) return false;
-    if (!isOwnTask(t)) return false;
     var age = addedAgeDays(t);
     return age !== null && age > 3;
   }
