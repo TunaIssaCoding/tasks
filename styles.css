@@ -85,7 +85,7 @@ details summary { color: #6b7280; font-size: 12px; cursor: pointer; margin: 4px 
 .tabs button.active { border-color: #2563eb; color: #1d4ed8; font-weight: 600; }
 #roomFilter { padding: 3px 8px; margin-bottom: 6px; max-width: 220px; }
 .date-tag { display: inline-block; margin-left: 8px; font-size: 11px; color: #6b7280; font-weight: normal; }
-.dates-toggle { border: 0; background: transparent; padding: 4px 0; color: inherit; font: inherit; text-transform: inherit; letter-spacing: inherit; cursor: pointer; }
+.dates-toggle, .events-toggle { border: 0; background: transparent; padding: 4px 0; color: inherit; font: inherit; text-transform: inherit; letter-spacing: inherit; cursor: pointer; }
 .dates-collapsed > ul { display: none; }
 .inline-editor fieldset { min-width: 0; margin: 10px 0; padding: 0; border: 0; }
 .inline-editor legend { font-size: 12px; color: #4b5563; margin-bottom: 5px; }
@@ -95,24 +95,14 @@ details summary { color: #6b7280; font-size: 12px; cursor: pointer; margin: 4px 
 .editor-heading, .editor-actions { display: -webkit-flex; display: flex; -webkit-align-items: center; align-items: center; }
 .editor-heading strong { -webkit-flex: 1; flex: 1; }
 .editor-actions { margin-top: 16px; }
+.provenance-quote { margin: 6px 0 0; padding-left: 9px; border-left: 2px solid #94a3b8; font-style: italic; white-space: pre-wrap; }
+.event-singles { margin-top: 4px; }
 .provenance { border: 1px dashed #94a3b8; border-radius: 7px; padding: 8px; margin-top: 12px; font-size: 12px; color: #475569; }
 .editor-backdrop { display: none; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
 /* Proposals stay visually distinct from the user's accepted tasks. */
-.inbox-card { margin: 12px 0; padding: 14px; border: 1px dashed #94a3b8; border-radius: 10px; background: #fff; word-wrap: break-word; }
-.inbox-card.focused { outline: 2px solid #2563eb; outline-offset: 2px; }
 .bot-mark { color: #475569; font-size: 12px; }
 .bot-square { display: inline-block; width: 7px; height: 7px; margin-right: 6px; background: #64748b; vertical-align: 1px; }
-.inbox-source { color: #475569; font-size: 12px; margin: 5px 0; }
-.inbox-card blockquote { margin: 12px 0; padding-left: 12px; border-left: 2px solid #94a3b8; color: #475569; font-style: italic; white-space: pre-wrap; }
-.inbox-card h2 { font-size: 16px; margin: 12px 0 6px; }
-.inbox-fields { color: #475569; font-size: 13px; margin: 6px 0; }
-.inbox-actions { display: -webkit-flex; display: flex; -webkit-flex-wrap: wrap; flex-wrap: wrap; margin-top: 12px; }
-.inbox-actions .btn { margin: 0 6px 6px 0; min-height: 38px; }
-.inbox-diffs { margin: 12px 0; font-size: 13px; }
-.inbox-diffs > div { margin-top: 9px; }
-.inbox-diffs dt { color: #6b7280; text-transform: capitalize; }
-.inbox-diffs dd { margin: 3px 0 0; white-space: pre-wrap; }
 .diff-from { color: #6b7280; }
 .tabs { overflow-x: auto; }
 .tabs button { -webkit-flex-shrink: 0; flex-shrink: 0; white-space: nowrap; }

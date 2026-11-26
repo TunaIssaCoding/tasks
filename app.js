@@ -227,40 +227,8 @@
   function freshInboxMeta() {
     return { sha: null, base: emptyInbox(), dirty: false, undos: {}, removed: {} };
   }
-  function proposalMap(value) {
-    var map = Object.create(null);
-    value.proposals.forEach(function (p) { map[p.id] = p; });
-    return map;
-  }
   function equalValue(a, b) { return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b)); }
-  function sameInbox(a, b) {
-    var left = clone(a), right = clone(b);
-    delete left.updatedAt; delete right.updatedAt;
-    return equalValue(left, right);
-  }
   /* Remote owns membership and every field except a locally changed decision. */
-  function mergeInbox(local, remote, base) {
-    var locals = proposalMap(local), bases = proposalMap(base), result = clone(remote);
-    result.proposals.forEach(function (p) {
-      var l = locals[p.id], b = bases[p.id];
-      if (!l) return;
-      if (inboxMeta.undos[p.id] && equalValue(p.decision, inboxMeta.undos[p.id])) {
-        p.decision = l.decision == null ? null : clone(l.decision);
-      }
-      else if (b && !equalValue(l.decision, b.decision) &&
-          l.decision != null && p.decision == null) p.decision = clone(l.decision);
-    });
-    return result;
-  }
-  function proposalById(id) {
-    for (var i = 0; i < inbox.proposals.length; i++) if (inbox.proposals[i].id === id) return inbox.proposals[i];
-    return null;
-  }
-  function actionableProposals() {
-    return inbox.proposals.filter(function (p) {
-      return p.decision == null && /^(add|change|close)$/.test(p.type);
-    });
-  }
 
   /*
    * Canonical comparison ignores local-only bookkeeping and document
@@ -339,7 +307,7 @@
   }
   function freshUi() {
     return {
-      query: '', ownerFilter: 'all', roomFilter: '', tab: 'tasks', datesCollapsed: true,
+      query: '', ownerFilter: 'all', roomFilter: '', tab: 'tasks', datesCollapsed: true, eventsCollapsed: true,
       collapsedTriggers: {}, open: {}, status: 'idle', msg: ''
     };
   }
@@ -365,6 +333,7 @@
         roomFilter: ui.roomFilter,
         tab: ui.tab,
         datesCollapsed: ui.datesCollapsed,
+        eventsCollapsed: ui.eventsCollapsed,
         ownerFilter: ui.ownerFilter,
         collapsedTriggers: ui.collapsedTriggers
       });
@@ -372,7 +341,7 @@
     persist();
   }
   function collapseState() {
-    return { datesCollapsed: ui.datesCollapsed, collapsedTriggers: ui.collapsedTriggers };
+    return { datesCollapsed: ui.datesCollapsed, eventsCollapsed: ui.eventsCollapsed, collapsedTriggers: ui.collapsedTriggers };
   }
 
   function pending() {
@@ -383,7 +352,6 @@
   }
   function updateDirty() {
     meta.dirty = !sameDoc(doc, meta.base);
-    inboxMeta.dirty = !sameInbox(inbox, inboxMeta.base) || Object.keys(inboxMeta.removed).length > 0;
   }
   function persist() {
     if (!active) return false;
@@ -426,7 +394,32 @@
     }
     return true;
   }
+  /*
+   * A device that edited offline before the board moved to schema 3 still holds schema-2 tasks.
+   * Convert them with the same rules as the box migration (taskWho/taskWhen/taskKind), so their
+   * edits merge by updatedAt as usual. Hand-moved flags carry over as whenManual.
+   */
+  var LEGACY_TASK_FIELDS = ['section', 'sectionManual', 'owner', 'trigger', 'triggerManual', 'hidden', 'hideUntil', 'hideUntilDate'];
+  var KNOWN_SECTIONS = { today: 1, followups: 1, triggers: 1, longterm: 1, ideas: 1 };
+  function toSchema3Task(t) {
+    var out = clone(t), tags = Array.isArray(t.tags) ? t.tags.slice() : [];
+    out.who = taskWho(t);
+    out.when = taskWhen(t);
+    out.kind = taskKind(t);
+    if (out.whoSince === undefined) out.whoSince = t.updatedAt || 0;
+    if (t.sectionManual || t.triggerManual) out.whenManual = true;
+    if (t.trigger && !(out.when.kind === 'event' && out.when.event === t.trigger) &&
+        tags.indexOf('trigger:' + t.trigger) === -1) tags.push('trigger:' + t.trigger);
+    if (t.section && !KNOWN_SECTIONS[t.section] && tags.indexOf('section:' + t.section) === -1) tags.push('section:' + t.section);
+    if (tags.length) out.tags = tags;
+    LEGACY_TASK_FIELDS.forEach(function (key) { delete out[key]; });
+    return out;
+  }
+  function toSchema3(value) {
+    return { schema: 3, tasks: value.tasks.map(toSchema3Task), updatedAt: value.updatedAt || 0 };
+  }
   function merge(local, remote) {
+    if (local.schema !== 3 && remote.schema === 3) local = toSchema3(local);
     if ((local.schema === 3) !== (remote.schema === 3)) {
       var error = new Error('Task schema changed; pending edits are preserved. Reconcile them before syncing the migrated board.');
       error.code = 'SCHEMA_CHANGED';
@@ -574,12 +567,6 @@
         var remote = await getRemote(epoch);
         assertCurrent(epoch);
 
-        var remoteInbox = await getRemote(epoch, true);
-        assertCurrent(epoch);
-        inbox = mergeInbox(inbox, remoteInbox.doc, inboxMeta.base);
-        inboxMeta.base = clone(remoteInbox.doc);
-        inboxMeta.sha = remoteInbox.sha;
-        reconcileInboxTasks(remote.doc);
         /*
          * Read the live document after GET resolves. Edits during GET are
          * included; merge never mutates either input.
@@ -587,8 +574,6 @@
         doc = meta.dirty ? merge(doc, remote.doc) : clone(remote.doc);
         meta.base = clean(remote.doc);
         meta.sha = remote.sha;
-        removeUndoneTasks();
-        healInbox();
         persist();
         render();
 
@@ -622,7 +607,6 @@
            * sent versions; they remain dirty against the published baseline.
            */
           doc = merge(doc, published);
-          removeUndoneTasks();
           completed = true;
           break;
         }
@@ -638,7 +622,6 @@
       }
       if (!completed) throw new Error('Repeated sync conflicts');
       updateDirty();
-      if (!meta.dirty && inboxMeta.dirty) await syncInbox(epoch);
 
       netFails = 0;
       meta.lastSync = now();
@@ -646,7 +629,7 @@
       render();
       if (storageError) {
         setStatus('err', storageError);
-      } else if (meta.dirty || inboxMeta.dirty) {
+      } else if (meta.dirty) {
         setStatus('busy', pending() + ' queued');
         again = true;
       } else {
@@ -668,7 +651,7 @@
         netFails = Math.min(netFails + 1, 5); schedule(2000 * netFails);
         setStatus('err',
           (navigator.onLine === false ? 'Offline' : 'Sync failed') +
-          (meta.dirty || inboxMeta.dirty ? ' · decisions or tasks queued' : ''));
+          (meta.dirty ? ' · edits queued' : ''));
       }
     } finally {
       if (isCurrent(epoch)) {
@@ -682,85 +665,6 @@
     }
   }
 
-  function removeUndoneTasks() {
-    doc.tasks = doc.tasks.filter(function (t) { return !inboxMeta.removed[t.acceptedFrom]; });
-  }
-  function reconcileInboxTasks(remote) {
-    var accepted = Object.create(null), remoteProposals = proposalMap(inboxMeta.base);
-    remote.tasks.forEach(function (t) { if (t.acceptedFrom) accepted[t.acceptedFrom] = t; });
-    doc.tasks = doc.tasks.filter(function (t) {
-      if (!t._new || !t.acceptedFrom) return true;
-      var other = accepted[t.acceptedFrom], p = remoteProposals[t.acceptedFrom];
-      var undone = inboxMeta.undos[t.acceptedFrom];
-      if (other && undone && other.id === undone.taskId && p &&
-          (p.decision == null || equalValue(p.decision, undone))) {
-        /* Undo followed by a new acceptance before its clear reaches GitHub:
-         * reuse our original creation rather than discard the revised fields. */
-        t.id = other.id; t.label = other.label;
-        t.createdAt = other.createdAt;
-        t.updatedAt = Math.max(t.updatedAt || 0, other.updatedAt || 0) + 1;
-        delete t._new; delete t._creator;
-        return true;
-      }
-      return other ? other.id === t.id && sameCreation(t, other) :
-        !!p && (p.decision == null || (undone && equalValue(p.decision, undone)));
-    });
-  }
-  function healInbox() {
-    var bases = proposalMap(inboxMeta.base);
-    doc.tasks.forEach(function (t) {
-      var p = t.acceptedFrom && proposalById(t.acceptedFrom);
-      if (!p || (inboxMeta.undos[p.id] && p.decision == null) || inboxMeta.removed[p.id]) return;
-      if (p.decision == null) p.decision = { result: 'accepted', at: now(), taskId: t.id };
-      else if (p.type === 'add' && bases[p.id] &&
-          (!bases[p.id].decision || equalValue(bases[p.id].decision, inboxMeta.undos[p.id])) &&
-          p.decision.result !== 'dismissed') p.decision.taskId = t.id;
-    });
-  }
-  async function syncInbox(epoch) {
-    /* Removals have now been acknowledged by tasks.json. */
-    inboxMeta.removed = {};
-    for (var attempt = 0; attempt < 6; attempt++) {
-      var remote = await getRemote(epoch, true);
-      assertCurrent(epoch);
-      inbox = mergeInbox(inbox, remote.doc, inboxMeta.base);
-      inboxMeta.base = clone(remote.doc);
-      inboxMeta.sha = remote.sha;
-      healInbox();
-      persist(); render();
-      if (meta.dirty || sameInbox(inbox, remote.doc) || !remote.sha) return;
-      var published = clone(inbox);
-      published.updatedAt = Math.max(now(), published.updatedAt || 0);
-      var response = await gh(epoch, 'PUT', contentPath(true), {
-        message: 'inbox decision [' + cfg.deviceId + ']', branch: cfg.branch, sha: remote.sha,
-        content: b64encode(JSON.stringify(published, null, 1))
-      });
-      assertCurrent(epoch);
-      if (response.ok) {
-        var result = await response.json();
-        assertCurrent(epoch);
-        if (!result || !result.content || !result.content.sha) throw apiError('PUT inbox', response.status);
-        /* Keep decisions/Undo performed while the immutable snapshot was in flight. */
-        var latest = proposalMap(inbox);
-        inbox = clone(published);
-        inbox.proposals.forEach(function (p) {
-          if (latest[p.id] && !equalValue(latest[p.id].decision, p.decision)) p.decision = latest[p.id].decision;
-        });
-        inboxMeta.base = published;
-        inboxMeta.sha = result.content.sha;
-        Object.keys(inboxMeta.undos).forEach(function (id) {
-          var p = proposalMap(published)[id];
-          if (!p || !equalValue(p.decision, inboxMeta.undos[id])) delete inboxMeta.undos[id];
-        });
-        return;
-      }
-      if (response.status !== 409 && response.status !== 422 && response.status < 500) throw apiError('PUT inbox', response.status);
-      try { await response.text(); } catch (ignore) {}
-      if (attempt < 5) await delay(400 * (attempt + 1));
-      assertCurrent(epoch);
-    }
-    throw new Error('Repeated inbox sync conflicts');
-  }
   function schedule(ms) {
     if (!active || closing) return;
     clearTimeout(debounce);
@@ -806,7 +710,7 @@
     if (syncing) again = true;
     schedule();
   }
-  function addTask(raw, proposed) {
+  function addTask(raw) {
     if (!active || closing) return;
     raw = raw.trim();
     if (!raw) return;
@@ -849,26 +753,6 @@
       task.section = 'today';
       task.owner = whoToOwner({ kind: 'me' });
       task.hidden = false;
-    }
-    if (proposed) {
-      task.text = proposed.text;
-      task.detail = proposed.text;
-      task.title = proposed.title || shortTitle(proposed.text);
-      task.titleAuto = !proposed.title;
-      task.room = proposed.room || '';
-      task.note = proposed.note || '';
-      task.tags = clone(proposed.tags || []);
-      task.source = 'inbox';
-      task.acceptedFrom = proposed.acceptedFrom;
-      if (doc.schema === 3) {
-        task.who = clone(proposed.who || { kind: 'me' });
-        task.when = clone(proposed.when || { kind: 'next' });
-        task.kind = proposed.kind || 'task';
-      } else {
-        task.owner = whoToOwner(proposed.who || { kind: 'me' });
-        if (proposed.kind === 'idea') task.section = 'ideas';
-        applyWhenSchema2(task, proposed.when || { kind: 'next' });
-      }
     }
     doc.tasks.push(task);
     touch(task);
@@ -929,63 +813,6 @@
     return true;
   }
 
-  function decideProposal(id, action, fields) {
-    if (!active || closing) return;
-    var p = proposalById(id);
-    if (!p || p.decision != null) return;
-    var t = p.type === 'add' ? null : byId(p.taskId), saved = t && clone(t), created = false;
-    var result = 'dismissed';
-    if (action === 'accept') {
-      if (p.type === 'add') {
-        t = doc.tasks.filter(function (task) { return task.acceptedFrom === id; })[0];
-        if (!t) {
-          var values = clone(p.task || {});
-          Object.keys(fields || {}).forEach(function (key) { values[key] = clone(fields[key]); });
-          if (!String(values.text || '').trim()) return;
-          result = equalValue(values, p.task) ? 'accepted' : 'edited';
-          values.acceptedFrom = id;
-          t = addTask(values.text, values);
-          created = true;
-        } else result = 'accepted';
-      } else {
-        if (!t || t.deleted) return;
-        if (p.type === 'change') {
-          var candidate = clone(t);
-          /* Kind's normal move-to-Later precedes an explicit When diff. */
-          var fieldsToChange = Object.keys(p.changes || {}).sort(function (a, b) {
-            return a === 'kind' ? -1 : b === 'kind' ? 1 : 0;
-          });
-          for (var i = 0; i < fieldsToChange.length; i++) {
-            var field = fieldsToChange[i];
-            if (!changeTask(candidate, field, p.changes[field].to, true)) return;
-          }
-          doc.tasks[doc.tasks.indexOf(t)] = candidate;
-          t = candidate;
-        } else if (p.type === 'close') {
-          t.done = true; t.doneAt = now();
-        } else return;
-        touch(t, taskSig(saved));
-        result = 'accepted';
-      }
-    }
-    if (action === 'accept') delete inboxMeta.removed[id];
-    p.decision = { result: result, at: now() };
-    if (p.type !== 'add' || t) p.decision.taskId = t ? t.id : p.taskId;
-    var decision = clone(p.decision);
-    persist(); render(); schedule();
-    toast(result === 'dismissed' ? 'Proposal dismissed' : 'Proposal accepted', function () {
-      var current = proposalById(id);
-      if (!current || !current.decision || current.decision.result !== decision.result ||
-          current.decision.at !== decision.at) return;
-      inboxMeta.undos[id] = clone(current.decision);
-      current.decision = null;
-      if (created) {
-        inboxMeta.removed[id] = true;
-        removeUndoneTasks();
-      } else if (action === 'accept' && saved) restoreTask(saved);
-      persist(); render(); schedule();
-    });
-  }
 
   /* ---------- drag ---------- */
 
@@ -1245,195 +1072,6 @@
 
   /* ---------- rendering ---------- */
 
-  function inboxWhenLabel(when) {
-    when = when || { kind: 'next' };
-    if (when.kind === 'date') return when.date ? displayDay(when.date) : 'On a date';
-    if (when.kind === 'event') return 'After ' + (when.event || 'an event');
-    return { today: 'Today', next: 'Next', later: 'Later' }[when.kind] || when.kind;
-  }
-  function inboxValue(field, value) {
-    if (value == null || value === '') return 'None';
-    if (field === 'who' && typeof value === 'object') {
-      return value.kind === 'me' ? 'Me' :
-        (value.kind === 'chase' ? 'Chasing ' : 'Waiting on ') + (value.name || '');
-    }
-    if (field === 'when' && typeof value === 'object') return inboxWhenLabel(value);
-    return typeof value === 'object' ? JSON.stringify(value) : String(value);
-  }
-  function proposalAge(stamp) {
-    var minutes = Math.max(0, Math.floor((now() - (Number(stamp) || Date.parse(stamp) || now())) / 60000));
-    if (!minutes) return 'just now';
-    if (minutes < 60) return minutes + ' min ago';
-    if (minutes < 1440) return Math.floor(minutes / 60) + ' hr ago';
-    return Math.floor(minutes / 1440) + ' days ago';
-  }
-  function inboxButton(action, label, primary) {
-    return '<button type="button" class="btn' + (primary ? ' primary' : '') +
-      '" data-inbox-act="' + action + '">' + esc(label) + '</button>';
-  }
-  function inboxActions(p, task) {
-    if (p.type === 'add') return inboxButton('accept', 'Accept to ' + inboxWhenLabel(task.when), true) +
-      ['today', 'next', 'later'].map(function (kind) {
-        return inboxButton(kind, inboxWhenLabel({ kind: kind }));
-      }).join('') + inboxButton('edit', 'Edit') + inboxButton('dismiss', 'Dismiss');
-    return inboxButton('accept', p.type === 'change' ? 'Apply change' : 'Close it', true) +
-      inboxButton('dismiss', p.type === 'change' ? 'Keep mine' : 'Keep open');
-  }
-  function inboxCardHtml(p) {
-    var source = p.source || {}, target = p.type !== 'add' && byId(p.taskId);
-    var missing = p.type !== 'add' && (!target || target.deleted), task = p.task || {};
-    var suggestion;
-    if (missing) suggestion = '<p>Task #' + esc(p.taskId) + ' no longer exists</p>';
-    else if (p.type === 'add') {
-      suggestion = '<h2>' + esc(task.text || task.title || '') + '</h2><p class="inbox-fields">' +
-        esc(inboxValue('who', task.who || { kind: 'me' })) + ' · ' + esc(inboxWhenLabel(task.when)) +
-        (task.room ? ' · ' + esc(task.room) : '') + '</p>';
-    } else {
-      var view = taskView(target);
-      suggestion = '<h2>' + esc(view.title || view.text) + ' <span class="badge">#' +
-        esc(target.id) + '</span></h2>';
-      if (p.type === 'change') suggestion += '<dl class="inbox-diffs">' +
-        Object.keys(p.changes || {}).map(function (field) {
-          var change = p.changes[field];
-          return '<div><dt>' + esc(field) + '</dt><dd><span class="diff-from">' +
-            esc(inboxValue(field, change.from)) + '</span> <span aria-label="to">→</span> <strong>' +
-            esc(inboxValue(field, change.to)) + '</strong></dd></div>';
-        }).join('') + '</dl>';
-    }
-    return '<article class="inbox-card' + (String(focusId) === String(p.id) ? ' focused' : '') +
-      '" data-proposal="' + esc(p.id) + '" aria-label="' + esc(p.type + ' proposal') + '">' +
-      '<div class="bot-mark"><span class="bot-square" aria-hidden="true"></span>' +
-      esc(source.bot || 'Unknown source') + ' · <time title="' +
-      esc(new Date(Number(p.createdAt) || Date.parse(p.createdAt)).toLocaleString()) + '">' +
-      esc(proposalAge(p.createdAt)) + '</time></div><p class="inbox-source">' + esc(source.label || '') +
-      '</p>' + (source.quote ? '<blockquote>' + esc(source.quote) + '</blockquote>' : '') +
-      suggestion + '<div class="inbox-actions">' +
-      (missing ? inboxButton('dismiss', 'Dismiss') : inboxActions(p, task)) + '</div></article>';
-  }
-  function inboxField(name, label, type, list) {
-    return '<label>' + label + '<input class="input" data-inbox-field="' + name + '" type="' +
-      (type || 'text') + '"' + (list ? ' list="' + list + '"' : '') + '></label>';
-  }
-  function openInboxEditor(p) {
-    if (!p || p.type !== 'add' || p.decision != null) return;
-    finishEditor(false);
-    focusId = p.id;
-    render();
-    var cards = $('#list').querySelectorAll('.inbox-card'), card;
-    Array.prototype.forEach.call(cards, function (node) {
-      if (node.getAttribute('data-proposal') === String(p.id)) card = node;
-    });
-    if (!card) return;
-    var draft = clone(p.task), wrap = document.createElement('div'), backdrop = document.createElement('div');
-    draft.who = draft.who || { kind: 'me' };
-    draft.when = draft.when || { kind: 'next' };
-    draft.text = draft.text || '';
-    draft.room = draft.room || '';
-    wrap.className = 'inline-editor inbox-editor';
-    wrap.setAttribute('role', 'region');
-    wrap.setAttribute('aria-label', 'Edit suggested task');
-    backdrop.className = 'editor-backdrop';
-    backdrop.onclick = function () { finishEditor(false); };
-    card.appendChild(backdrop);
-    wrap.innerHTML = '<div class="editor-heading"><strong>Edit suggested task</strong>' +
-      inboxButton('cancel', 'Cancel') + '</div>' + inboxField('text', 'Task') +
-      '<fieldset><legend>Who moves next</legend><div class="segments">' +
-      [['me', 'Me'], ['chase', 'Chasing'], ['waiting', 'Waiting on']].map(function (pair) {
-        return '<button type="button" data-inbox-who="' + pair[0] + '">' + pair[1] + '</button>';
-      }).join('') + '</div><div data-extra="who">' + inboxField('whoName', 'Name', 'text', 'inboxNames') +
-      '</div></fieldset><fieldset><legend>When</legend><div class="segments">' +
-      [['today', 'Today'], ['next', 'Next'], ['later', 'Later'], ['date', 'On a date…'], ['event', 'After an event…']].map(function (pair) {
-        return '<button type="button" data-inbox-when="' + pair[0] + '">' + pair[1] + '</button>';
-      }).join('') + '</div><div data-extra="date">' + inboxField('whenDate', 'Date', 'date') +
-      '</div><div data-extra="event">' + inboxField('whenEvent', 'Event', 'text', 'inboxEvents') +
-      '</div></fieldset>' + inboxField('room', 'Room', 'text', 'inboxRooms') +
-      '<datalist id="inboxNames">' + suggestions('names') + '</datalist>' +
-      '<datalist id="inboxEvents">' + suggestions('events') + '</datalist>' +
-      '<datalist id="inboxRooms">' + suggestions('rooms') + '</datalist>' +
-      '<p class="field-help">Nothing is saved until you accept.</p><div class="inbox-actions">' +
-      inboxButton('accept', 'Accept to ' + inboxWhenLabel(draft.when), true) +
-      inboxButton('dismiss', 'Dismiss') + '</div>';
-    card.appendChild(wrap);
-    editor = { proposalId: p.id, draft: draft, original: clone(draft), wrap: wrap, backdrop: backdrop };
-    var values = { text: draft.text || '', room: draft.room || '', whoName: draft.who.name || '',
-      whenDate: draft.when.date || '', whenEvent: draft.when.event || '' };
-    Object.keys(values).forEach(function (field) {
-      wrap.querySelector('[data-inbox-field="' + field + '"]').value = values[field];
-    });
-    function fieldValue(name) { return wrap.querySelector('[data-inbox-field="' + name + '"]').value; }
-    function updateDraft() {
-      if (!active || closing || !editor || editor.proposalId !== p.id) return;
-      draft.text = fieldValue('text'); draft.room = fieldValue('room');
-      if (draft.who.kind !== 'me') draft.who.name = fieldValue('whoName').trim();
-      if (draft.when.kind === 'date') draft.when.date = fieldValue('whenDate');
-      if (draft.when.kind === 'event') draft.when.event = fieldValue('whenEvent').trim();
-      wrap.querySelector('[data-inbox-act="accept"]').textContent = 'Accept to ' + inboxWhenLabel(draft.when);
-    }
-    function refreshChoices() {
-      Array.prototype.forEach.call(wrap.querySelectorAll('[data-inbox-who]'), function (button) {
-        button.setAttribute('aria-pressed', String(button.getAttribute('data-inbox-who') === draft.who.kind));
-      });
-      Array.prototype.forEach.call(wrap.querySelectorAll('[data-inbox-when]'), function (button) {
-        button.setAttribute('aria-pressed', String(button.getAttribute('data-inbox-when') === draft.when.kind));
-      });
-      wrap.querySelector('[data-extra="who"]').hidden = draft.who.kind === 'me';
-      wrap.querySelector('[data-extra="date"]').hidden = draft.when.kind !== 'date';
-      wrap.querySelector('[data-extra="event"]').hidden = draft.when.kind !== 'event';
-    }
-    wrap.oninput = updateDraft;
-    wrap.onchange = updateDraft;
-    wrap.onclick = function (e) {
-      var button = e.target.closest('button');
-      if (!button || !active || closing) return;
-      var who = button.getAttribute('data-inbox-who'), when = button.getAttribute('data-inbox-when');
-      if (who) draft.who = { kind: who };
-      if (when) draft.when = { kind: when };
-      if (who || when) {
-        updateDraft(); refreshChoices();
-        var field = who && who !== 'me' ? 'whoName' :
-          when === 'date' ? 'whenDate' : when === 'event' ? 'whenEvent' : '';
-        if (field) wrap.querySelector('[data-inbox-field="' + field + '"]').focus();
-      }
-    };
-    wrap.onkeydown = function (e) {
-      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finishEditor(false); }
-    };
-    refreshChoices();
-    wrap.querySelector('[data-inbox-field="text"]').focus();
-  }
-  function inboxAction(id, action) {
-    if (action === 'cancel') { finishEditor(false); return; }
-    var p = proposalById(id);
-    if (!p || p.decision != null) return;
-    if (action === 'edit') { openInboxEditor(p); return; }
-    var fields = editor && editor.proposalId === id ? clone(editor.draft) : null;
-    if (action === 'today' || action === 'next' || action === 'later') {
-      fields = fields || clone(p.task);
-      fields.when = { kind: action }; action = 'accept';
-    }
-    if (action !== 'accept' && action !== 'dismiss') return;
-    if (action === 'accept' && fields) {
-      var who = fields.who || { kind: 'me' }, when = fields.when || { kind: 'next' };
-      var invalid = !(fields.text || '').trim() ? 'text' :
-        who.kind !== 'me' && !who.name ? 'whoName' :
-        when.kind === 'date' && !when.date ? 'whenDate' :
-        when.kind === 'event' && !when.event ? 'whenEvent' : '';
-      if (invalid) {
-        toast('Complete the suggested task fields before accepting.');
-        if (editor) editor.wrap.querySelector('[data-inbox-field="' + invalid + '"]').focus();
-        return;
-      }
-    }
-    if (fields && editor && editor.proposalId === id) {
-      var changed = {};
-      ['text', 'room', 'who', 'when'].forEach(function (field) {
-        if (!equalValue(fields[field], editor.original[field])) changed[field] = fields[field];
-      });
-      fields = changed;
-    }
-    if (editor) finishEditor(false);
-    decideProposal(id, action, fields || undefined);
-  }
 
   function relativeSync() {
     var minutes = Math.max(0, Math.floor((now() - meta.lastSync) / 60000));
@@ -1506,10 +1144,9 @@
       (demo ? ' <button class="btn small" id="resetDemo">Reset demo</button>' : '') +
       '</div><section id="helpPanel" class="help-panel" aria-label="Keyboard shortcuts" hidden>' +
       '<strong>Keyboard shortcuts</strong><button class="btn small" id="helpClose">Close</button>' +
-      '<p>j / k · Move between visible tasks or Inbox cards<br>Enter · Expand focused task<br>' +
-      'Inbox: a · Accept / apply / close, e · Edit suggested task, d · Dismiss<br>' +
+      '<p>j / k · Move between visible tasks<br>Enter · Expand focused task<br>' +
       '/ · Search<br>? · Help<br>Esc · Close editor, menu or help</p>' +
-      '<p>Task changes save automatically. Inbox drafts save only on Accept; Esc discards the draft. ' +
+      '<p>Task changes save automatically. Tasks from bots arrive directly in your list. ' +
       'Shortcuts are inactive in inputs, editors and lock screens.</p>' +
       '</section><form class="add" id="add" autocomplete="off">' +
       '<input class="input" id="addText" aria-label="Add a task" placeholder="Add a task (Room: task works too)">' +
@@ -1524,7 +1161,6 @@
       '<button type="button" class="chip" data-owner="stale">Stale</button>' +
       '<select class="select" id="roomFilter" aria-label="Filter by room"></select></div>' +
       '<nav id="tabs" class="tabs" aria-label="Task views">' +
-      '<button type="button" data-tab="inbox">Inbox (0)</button>' +
       '<button type="button" data-tab="tasks">Tasks</button>' +
       '<button type="button" data-tab="ideas">Ideas</button>' +
       '<button type="button" data-tab="done">Done this week</button></nav></header><main id="list"></main>' +
@@ -1618,7 +1254,7 @@
     }
     return '';
   }
-  function taskHtml(raw) {
+  function taskHtml(raw, showEvent) {
     var t = taskView(raw), title = t.title || t.text || '';
     var date = t.when.kind === 'date' && t.when.date;
     return '<li class="task' + (t.done ? ' done' : '') +
@@ -1628,20 +1264,23 @@
       (t.room ? '<span class="room">' + esc(t.room) + ' · </span>' : '') +
       '<span class="txt">' + esc(title) + '</span>' +
       (date ? '<span class="date-tag">' + (date <= localDay(now()) ? 'from ' : '') + esc(displayDay(date)) + '</span>' : '') +
+      (showEvent === true && t.when.event ? '<span class="date-tag event-tag">after: ' + esc(t.when.event) + '</span>' : '') +
       '</span>' + pillHtml(t) +
       '<button type="button" class="badge" data-act="copy" title="Copy task ID">#' + esc(t.id) + '</button>' +
       (t.detail && t.detail !== title ? '<div class="note">' + esc(t.detail) + '</div>' : '') +
       '</div></li>';
   }
+  /* Events shared by several tasks get a collapsible group; a one-task event is a plain row tagged with its event. */
   function triggerGroupsHtml(tasks) {
-    var groups = Object.create(null);
+    var groups = Object.create(null), singles = [];
     tasks.forEach(function (t) {
       var event = taskView(t).when.event || '';
       if (!groups[event]) groups[event] = [];
       groups[event].push(t);
     });
-    Object.keys(groups).forEach(function (event) { sortByAdded(groups[event]); });
-    return Object.keys(groups).sort().map(function (event) {
+    var html = Object.keys(groups).sort().map(function (event) {
+      if (groups[event].length === 1) { singles.push(groups[event][0]); return ''; }
+      sortByAdded(groups[event]);
       var collapsed = !!ui.collapsedTriggers[event];
       return '<div class="tgroup' + (collapsed ? ' collapsed' : '') + '" data-trigger="' + esc(event) + '">' +
         '<button type="button" class="tgroup-h" aria-expanded="' + !collapsed + '">' +
@@ -1649,13 +1288,15 @@
         esc(event) + '</span><span class="tcount">' + groups[event].length + '</span></button>' +
         '<ul>' + groups[event].map(taskHtml).join('') + '</ul></div>';
     }).join('');
+    sortByAdded(singles);
+    if (singles.length) {
+      html += '<ul class="event-singles">' + singles.map(function (t) { return taskHtml(t, true); }).join('') + '</ul>';
+    }
+    return html;
   }
   function render() {
     if (!active) return;
-    var proposals = actionableProposals();
-    document.title = proposals.length ? '(' + proposals.length + ') Tasks' : 'Tasks';
-    var inboxTab = $('#tabs [data-tab="inbox"]');
-    if (inboxTab) inboxTab.textContent = 'Inbox (' + proposals.length + ')';
+    document.title = 'Tasks';
     if (editor) return;
     var list = $('#list');
     if (!list) return;
@@ -1680,12 +1321,6 @@
       button.setAttribute('aria-current', selected ? 'page' : 'false');
     });
     updateOwnerChips();
-    $('#ownerFilters').hidden = ui.tab === 'inbox';
-    if (ui.tab === 'inbox') {
-      list.innerHTML = proposals.map(inboxCardHtml).join('') ||
-        '<p class="empty">Nothing to decide. When a bot suggests a to-do, it waits here.</p>';
-      return;
-    }
     var visible = doc.tasks.filter(function (raw) {
       var t = taskView(raw);
       if (t.deleted) return false;
@@ -1732,14 +1367,16 @@
       });
       var names = { today: 'Today', next: 'Next', event: 'After an event', later: 'Later', date: 'On a date' };
       html = ['today', 'next', 'event', 'later', 'date'].map(function (kind) {
-        var tasks = groups[kind], collapsed = kind === 'date' && ui.datesCollapsed;
+        var tasks = groups[kind];
+        var toggle = kind === 'date' ? 'dates-toggle' : kind === 'event' ? 'events-toggle' : '';
+        var collapsed = (kind === 'date' && ui.datesCollapsed) || (kind === 'event' && ui.eventsCollapsed);
         if (!tasks.length && filtered) return '';
         return '<section class="sec' + (collapsed ? ' dates-collapsed' : '') +
           '" data-when="' + kind + '"><h2>' +
-          (kind === 'date' ? '<button type="button" class="dates-toggle" aria-expanded="' + !collapsed + '">' +
+          (toggle ? '<button type="button" class="' + toggle + '" aria-expanded="' + !collapsed + '">' +
           (collapsed ? '▸ ' : '▾ ') : '') + names[kind] + ' <span>' + tasks.length + '</span>' +
-          (kind === 'date' ? '</button>' : '') + '</h2>' +
-          (kind === 'event' ? triggerGroupsHtml(tasks) : '<ul>' + tasks.map(taskHtml).join('') + '</ul>') +
+          (toggle ? '</button>' : '') + '</h2>' +
+          (kind === 'event' ? (collapsed ? '' : triggerGroupsHtml(tasks)) : '<ul>' + tasks.map(taskHtml).join('') + '</ul>') +
           '</section>';
       }).join('');
     }
@@ -1757,13 +1394,6 @@
   }
   function onListClick(e) {
     if (!active || closing) return;
-    var card = e.target.closest('.inbox-card');
-    if (card) {
-      focusId = card.getAttribute('data-proposal');
-      var action = e.target.closest('[data-inbox-act]');
-      if (action) inboxAction(focusId, action.getAttribute('data-inbox-act'));
-      return;
-    }
     var h = e.target.closest('.tgroup-h');
     if (h) {
       var event = h.closest('.tgroup').getAttribute('data-trigger');
@@ -1772,6 +1402,9 @@
     }
     if (e.target.closest('.dates-toggle')) {
       ui.datesCollapsed = !ui.datesCollapsed; persistUi(); render(); return;
+    }
+    if (e.target.closest('.events-toggle')) {
+      ui.eventsCollapsed = !ui.eventsCollapsed; persistUi(); render(); return;
     }
     if (e.target.closest('input,select,textarea,.inline-editor')) return;
     var li = e.target.closest('li.task'), t = li && byId(li.getAttribute('data-id'));
@@ -1824,7 +1457,7 @@
     if (editor) finishEditor(true);
     var view = taskView(t);
     if (view.when.kind === 'date') ui.datesCollapsed = false;
-    if (view.when.kind === 'event') delete ui.collapsedTriggers[view.when.event];
+    if (view.when.kind === 'event') { ui.eventsCollapsed = false; delete ui.collapsedTriggers[view.when.event]; }
     render();
     var li = $('#list li.task[data-id="' + esc(t.id) + '"]');
     if (!li) return;
@@ -1859,18 +1492,23 @@
     var values = { whoName: view.who.name || '', whenDate: view.when.date || '',
       whenEvent: view.when.event || '', room: view.room || '', title: view.title || view.text || '', note: view.note || '' };
     Object.keys(values).forEach(function (key) { wrap.querySelector('[data-field="' + key + '"]').value = values[key]; });
-    if (view.acceptedFrom) {
-      var provenance = document.createElement('div'), parts = [];
-      var proposal = proposalById(view.acceptedFrom), source = proposal && proposal.source;
-      if (source && source.bot) parts.push('Proposed by ' + source.bot);
-      else if (view.source) parts.push('Proposed by ' + view.source);
-      var stamp = proposal ? proposal.createdAt : view.acceptedAt || view.createdAt;
+    /* Bots add tasks directly; show which one did, and what it was reading. */
+    var origin = view.addedBy ? 'Added by ' + view.addedBy : view.acceptedFrom ? 'Accepted from the old Inbox' :
+      view.source === 'openmd' ? 'Imported from open.md' : view.source === 'cli' ? 'Added by a box agent' : '';
+    if (origin) {
+      var provenance = document.createElement('div'), parts = [origin];
+      var stamp = view.acceptedAt || view.createdAt;
       if (stamp) parts.push(displayDay(localDay(Number(stamp) || Date.parse(stamp))));
-      if (source && source.label) parts.push(source.label);
+      if (view.sourceLabel) parts.push(view.sourceLabel);
       else if (view.tags && view.tags.length) parts.push(view.tags.join(', '));
-      parts.push('Reference: ' + view.acceptedFrom);
       provenance.className = 'provenance';
       provenance.textContent = parts.join(' · ');
+      if (view.sourceQuote) {
+        var quote = document.createElement('blockquote');
+        quote.className = 'provenance-quote';
+        quote.textContent = view.sourceQuote;
+        provenance.appendChild(quote);
+      }
       wrap.appendChild(provenance);
     }
     editor = { id: t.id, wrap: wrap, backdrop: backdrop, who: view.who.kind,
@@ -1939,8 +1577,8 @@
   }
   function finishEditor(saveEdit) {
     if (!editor) return;
-    if (saveEdit && !editor.proposalId) saveEditorField(document.activeElement);
-    var id = editor.proposalId || editor.id;
+    if (saveEdit) saveEditorField(document.activeElement);
+    var id = editor.id;
     editor = null;
     delete ui.open[id];
     focusId = id;
@@ -1968,27 +1606,6 @@
         target.closest('input,textarea,select,.inline-editor,[contenteditable]:not([contenteditable="false"])'))) return;
     if (e.ctrlKey || e.metaKey || e.altKey || $('dialog[open]')) return;
     if (editor && e.key !== 'Escape') return;
-    if (ui.tab === 'inbox' && ['a', 'e', 'd', 'j', 'k'].indexOf(e.key) !== -1) {
-      var cards = Array.prototype.slice.call($('#list').querySelectorAll('.inbox-card'));
-      if (!cards.length) return;
-      var current = -1;
-      cards.forEach(function (card, i) {
-        if (card.getAttribute('data-proposal') === String(focusId)) current = i;
-      });
-      if (e.key === 'j' || e.key === 'k') {
-        current = current < 0 ? (e.key === 'j' ? 0 : cards.length - 1) :
-          Math.max(0, Math.min(cards.length - 1, current + (e.key === 'j' ? 1 : -1)));
-        focusId = cards[current].getAttribute('data-proposal');
-        cards.forEach(function (card) { card.className = card.className.replace(/\s*focused/g, ''); });
-        cards[current].className += ' focused';
-        cards[current].scrollIntoView({ block: 'nearest' });
-      } else if (current >= 0) {
-        var action = e.key === 'a' ? 'accept' : e.key === 'e' ? 'edit' : 'dismiss';
-        if (cards[current].querySelector('[data-inbox-act="' + action + '"]')) inboxAction(focusId, action);
-      }
-      e.preventDefault();
-      return;
-    }
     if (e.key === '/') { e.preventDefault(); showSearch(); }
     else if (e.key === '?') { e.preventDefault(); toggleHelp(); }
     else if (e.key === 'Escape') { finishEditor(false); closePanels(); }
@@ -2045,6 +1662,7 @@
       inboxMeta.removed = inboxMeta.removed || {};
       if (stored.view) {
         ui.datesCollapsed = stored.view.datesCollapsed !== false;
+        ui.eventsCollapsed = stored.view.eventsCollapsed !== false;
         ui.collapsedTriggers = stored.view.collapsedTriggers || {};
       }
     } else {
@@ -2142,7 +1760,6 @@
     closing = false;
     netFails = 0;
     storageError = '';
-    healInbox();
     try {
       save(CFG_KEY, {
         repo: cfg.repo, path: cfg.path, branch: cfg.branch, deviceId: cfg.deviceId
@@ -2206,10 +1823,6 @@
           if (recovered && recovered[DOC_KEY]) {
             var saved = JSON.parse(recovered[DOC_KEY]);
             doc = merge(validateDoc(saved.doc || saved), doc);
-            if (saved.inbox) {
-              inbox = mergeInbox(validateInbox(saved.inbox), inbox,
-                saved.inboxMeta ? validateInbox(saved.inboxMeta.base) : emptyInbox());
-            }
             updateDirty();
             persist();
           }
@@ -2219,7 +1832,7 @@
       } catch (error) {
         // A genuinely ephemeral session may lock without a cache only when
         // GitHub has acknowledged every edit. Never discard dirty memory.
-        if (!cacheUnavailable || meta.dirty || inboxMeta.dirty || error.code !== 'PENDING_UNAVAILABLE') throw error;
+        if (!cacheUnavailable || meta.dirty || error.code !== 'PENDING_UNAVAILABLE') throw error;
       }
       clearPlaintext();
     } catch (error) {
@@ -2257,15 +1870,15 @@
     doc = stored && stored.doc ? validateDoc(stored.doc) : validateDoc(window.TasksDemoFixtures());
     meta = freshMeta();
     meta.base = clone(doc);
-    inbox = stored && stored.inbox ? validateInbox(stored.inbox) : validateInbox(window.TasksInboxFixtures());
+    inbox = emptyInbox();
     inboxMeta = freshInboxMeta();
-    inboxMeta.base = clone(inbox);
     ui = freshUi();
     var savedUi = load(UI_KEY, {});
     ui.query = savedUi.query || '';
     ui.roomFilter = savedUi.roomFilter || '';
-    ui.tab = /^(inbox|tasks|ideas|done)$/.test(savedUi.tab) ? savedUi.tab : 'tasks';
+    ui.tab = /^(tasks|ideas|done)$/.test(savedUi.tab) ? savedUi.tab : 'tasks';
     ui.datesCollapsed = savedUi.datesCollapsed !== false;
+    ui.eventsCollapsed = savedUi.eventsCollapsed !== false;
     ui.ownerFilter = /^(all|me|chase|waiting|stale)$/.test(savedUi.ownerFilter) ? savedUi.ownerFilter : 'all';
     ui.collapsedTriggers = savedUi.collapsedTriggers || {};
     active = true;
@@ -2281,8 +1894,7 @@
     var previous = clone(doc), previousInbox = clone(inbox), previousInboxMeta = clone(inboxMeta);
     finishEditor(false);
     doc = validateDoc(window.TasksDemoFixtures());
-    inbox = validateInbox(window.TasksInboxFixtures());
-    inboxMeta = freshInboxMeta(); inboxMeta.base = clone(inbox);
+    inbox = emptyInbox(); inboxMeta = freshInboxMeta();
     ui = freshUi(); focusId = null;
     persist(); renderShell(); render(); sync();
     toast('Demo reset', function () {
